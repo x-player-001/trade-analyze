@@ -2,7 +2,7 @@
 name = "trade-analyze"
 version = "0.1.0"
 description = "A股自动选股分析系统 - 候选池生成与验证闭环"
-requires-python = ">=3.11"
+requires-python = ">=3.9"
 dependencies = [
     # 数据采集
     "akshare>=1.16.0",
@@ -41,7 +41,7 @@ include = ["common*", "engine*", "api*"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py311"
+target-version = "py39"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "W", "UP", "B"]
