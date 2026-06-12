@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime
+from typing import Optional
 
 from sqlalchemy import (
     BigInteger,
@@ -57,14 +58,14 @@ class StockBasic(Base, TimestampMixin):
     name: Mapped[str] = mapped_column(String(32), nullable=False, comment="股票名称")
     # 板块：main(主板) / gem(创业板) / star(科创板) / bse(北交所)
     board: Mapped[str] = mapped_column(String(8), nullable=False, comment="板块")
-    industry: Mapped[str | None] = mapped_column(String(64), comment="所属行业")
-    list_date: Mapped[date | None] = mapped_column(Date, comment="上市日期")
+    industry: Mapped[Optional[str]] = mapped_column(String(64), comment="所属行业")
+    list_date: Mapped[Optional[date]] = mapped_column(Date, comment="上市日期")
     # 涨跌幅制度：10 / 20 / 30(北交所) cm
     price_limit_pct: Mapped[float] = mapped_column(
         Float, default=10.0, comment="涨跌幅限制(%)"
     )
     is_st: Mapped[bool] = mapped_column(Boolean, default=False, comment="是否ST/退市风险")
-    circ_mv: Mapped[float | None] = mapped_column(Float, comment="流通市值(亿元)")
+    circ_mv: Mapped[Optional[float]] = mapped_column(Float, comment="流通市值(亿元)")
     is_active: Mapped[bool] = mapped_column(
         Boolean, default=True, comment="是否仍在交易(未退市)"
     )
@@ -87,11 +88,11 @@ class DailyQuote(Base):
     low: Mapped[float] = mapped_column(Float, nullable=False)
     close: Mapped[float] = mapped_column(Float, nullable=False)
     # 原始未复权收盘（展示用）
-    raw_close: Mapped[float | None] = mapped_column(Float)
+    raw_close: Mapped[Optional[float]] = mapped_column(Float)
     volume: Mapped[float] = mapped_column(Float, comment="成交量(手)")
     amount: Mapped[float] = mapped_column(Float, comment="成交额(元)")
-    pct_chg: Mapped[float | None] = mapped_column(Float, comment="涨跌幅(%)")
-    turnover: Mapped[float | None] = mapped_column(Float, comment="换手率(%)")
+    pct_chg: Mapped[Optional[float]] = mapped_column(Float, comment="涨跌幅(%)")
+    turnover: Mapped[Optional[float]] = mapped_column(Float, comment="换手率(%)")
 
 
 class IndexDaily(Base):
@@ -109,7 +110,7 @@ class IndexDaily(Base):
     high: Mapped[float] = mapped_column(Float, nullable=False)
     low: Mapped[float] = mapped_column(Float, nullable=False)
     close: Mapped[float] = mapped_column(Float, nullable=False)
-    pct_chg: Mapped[float | None] = mapped_column(Float)
+    pct_chg: Mapped[Optional[float]] = mapped_column(Float)
 
 
 class MarketStatus(Base, TimestampMixin):
@@ -118,12 +119,12 @@ class MarketStatus(Base, TimestampMixin):
     __tablename__ = "market_status"
 
     trade_date: Mapped[date] = mapped_column(Date, primary_key=True)
-    sh_pct_chg: Mapped[float | None] = mapped_column(Float, comment="上证涨跌幅%")
-    gem_pct_chg: Mapped[float | None] = mapped_column(Float, comment="创业板涨跌幅%")
+    sh_pct_chg: Mapped[Optional[float]] = mapped_column(Float, comment="上证涨跌幅%")
+    gem_pct_chg: Mapped[Optional[float]] = mapped_column(Float, comment="创业板涨跌幅%")
     below_ma20: Mapped[bool] = mapped_column(Boolean, default=False, comment="上证跌破20日线")
     # 开关：True=允许出票, False=空仓不出票
     is_open: Mapped[bool] = mapped_column(Boolean, default=True, comment="是否允许出票")
-    reason: Mapped[str | None] = mapped_column(String(255), comment="关闭原因")
+    reason: Mapped[Optional[str]] = mapped_column(String(255), comment="关闭原因")
 
 
 # ---------------------------------------------------------------------------
@@ -144,7 +145,7 @@ class StockFactor(Base):
     # 硬过滤：是否通过（True=保留）
     passed_hard_filter: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     # 被淘汰原因（多个用逗号分隔），通过则为空
-    reject_reasons: Mapped[str | None] = mapped_column(String(255))
+    reject_reasons: Mapped[Optional[str]] = mapped_column(String(255))
 
     # 当日状态过滤：涨跌幅是否在 -1%~+1% 回踩确认窗口
     in_pullback_window: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -184,10 +185,10 @@ class PickSnapshot(Base, TimestampMixin):
     # 各因子得分快照（JSON 字符串，便于前端展示理由）
     factor_scores_json: Mapped[str] = mapped_column(Text, comment="因子得分明细JSON")
     # 命中理由文本（人类可读）
-    reasons: Mapped[str | None] = mapped_column(String(512))
+    reasons: Mapped[Optional[str]] = mapped_column(String(512))
     # 决策时点价格（后复权收盘 + 原始收盘）
     decision_close: Mapped[float] = mapped_column(Float, comment="后复权收盘")
-    decision_raw_close: Mapped[float | None] = mapped_column(Float, comment="原始收盘(展示)")
+    decision_raw_close: Mapped[Optional[float]] = mapped_column(Float, comment="原始收盘(展示)")
     # 当日是否涨停（涨停则次日难买入，标记不可成交）
     limit_up: Mapped[bool] = mapped_column(Boolean, default=False)
     tradable: Mapped[bool] = mapped_column(Boolean, default=True, comment="是否可模拟成交")
@@ -208,17 +209,17 @@ class PickValidation(Base, TimestampMixin):
     code: Mapped[str] = mapped_column(String(10), nullable=False, index=True)
 
     # 各窗口最高涨幅（相对决策收盘价，已扣双边成本）
-    t1_high_ret: Mapped[float | None] = mapped_column(Float)
-    t2_high_ret: Mapped[float | None] = mapped_column(Float)
-    t3_high_ret: Mapped[float | None] = mapped_column(Float)
+    t1_high_ret: Mapped[Optional[float]] = mapped_column(Float)
+    t2_high_ret: Mapped[Optional[float]] = mapped_column(Float)
+    t3_high_ret: Mapped[Optional[float]] = mapped_column(Float)
     # 各窗口收盘涨幅
-    t1_close_ret: Mapped[float | None] = mapped_column(Float)
-    t2_close_ret: Mapped[float | None] = mapped_column(Float)
-    t3_close_ret: Mapped[float | None] = mapped_column(Float)
+    t1_close_ret: Mapped[Optional[float]] = mapped_column(Float)
+    t2_close_ret: Mapped[Optional[float]] = mapped_column(Float)
+    t3_close_ret: Mapped[Optional[float]] = mapped_column(Float)
     # 命中：3日内出现 7%+ 单日涨幅或涨停
-    hit_7pct: Mapped[bool | None] = mapped_column(Boolean, index=True)
+    hit_7pct: Mapped[Optional[bool]] = mapped_column(Boolean, index=True)
     # 3日内最大回撤
-    max_drawdown: Mapped[float | None] = mapped_column(Float)
+    max_drawdown: Mapped[Optional[float]] = mapped_column(Float)
     # 是否完成验证（T+3 数据齐全）
     is_complete: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
 
@@ -236,15 +237,15 @@ class ValidationReport(Base, TimestampMixin):
     pick_count: Mapped[int] = mapped_column(Integer, default=0, comment="选股总数")
     tradable_count: Mapped[int] = mapped_column(Integer, default=0)
     # 核心指标
-    hit_rate_7pct: Mapped[float | None] = mapped_column(Float, comment="3日命中7%+比例")
-    avg_t3_high_ret: Mapped[float | None] = mapped_column(Float, comment="平均T3最高涨幅")
-    avg_profit_loss_ratio: Mapped[float | None] = mapped_column(Float, comment="平均盈亏比")
+    hit_rate_7pct: Mapped[Optional[float]] = mapped_column(Float, comment="3日命中7%+比例")
+    avg_t3_high_ret: Mapped[Optional[float]] = mapped_column(Float, comment="平均T3最高涨幅")
+    avg_profit_loss_ratio: Mapped[Optional[float]] = mapped_column(Float, comment="平均盈亏比")
     # 对照组
-    benchmark_market_ret: Mapped[float | None] = mapped_column(Float, comment="同期市场平均")
-    benchmark_random_hit_rate: Mapped[float | None] = mapped_column(Float, comment="随机组命中率")
+    benchmark_market_ret: Mapped[Optional[float]] = mapped_column(Float, comment="同期市场平均")
+    benchmark_random_hit_rate: Mapped[Optional[float]] = mapped_column(Float, comment="随机组命中率")
     # 增量：选股命中率 - 随机组命中率
-    edge_over_random: Mapped[float | None] = mapped_column(Float)
-    detail_json: Mapped[str | None] = mapped_column(Text, comment="完整明细JSON")
+    edge_over_random: Mapped[Optional[float]] = mapped_column(Float)
+    detail_json: Mapped[Optional[str]] = mapped_column(Text, comment="完整明细JSON")
 
 
 # ---------------------------------------------------------------------------
@@ -256,7 +257,7 @@ class ParamConfig(Base, TimestampMixin):
     __tablename__ = "param_config"
 
     version: Mapped[str] = mapped_column(String(16), primary_key=True)
-    description: Mapped[str | None] = mapped_column(String(255))
+    description: Mapped[Optional[str]] = mapped_column(String(255))
     # 全部阈值与权重以 JSON 存储，便于灵活迭代
     config_json: Mapped[str] = mapped_column(Text, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
@@ -272,11 +273,11 @@ class BenchmarkSample(Base, TimestampMixin):
 
     id: Mapped[int] = mapped_column(BigIntPK, primary_key=True, autoincrement=True)
     source_id: Mapped[str] = mapped_column(String(64), nullable=False, comment="截图目录id")
-    post_date: Mapped[date | None] = mapped_column(Date, comment="发帖日期")
-    code: Mapped[str | None] = mapped_column(String(10), index=True, comment="提取的股票代码")
-    name: Mapped[str | None] = mapped_column(String(32))
-    buy_date: Mapped[date | None] = mapped_column(Date, comment="推断买入日")
-    note: Mapped[str | None] = mapped_column(String(255))
+    post_date: Mapped[Optional[date]] = mapped_column(Date, comment="发帖日期")
+    code: Mapped[Optional[str]] = mapped_column(String(10), index=True, comment="提取的股票代码")
+    name: Mapped[Optional[str]] = mapped_column(String(32))
+    buy_date: Mapped[Optional[date]] = mapped_column(Date, comment="推断买入日")
+    note: Mapped[Optional[str]] = mapped_column(String(255))
     # 反推：系统在 buy_date 给该票的打分与排名（监督校准时回填）
-    system_score: Mapped[float | None] = mapped_column(Float)
-    system_rank: Mapped[int | None] = mapped_column(Integer)
+    system_score: Mapped[Optional[float]] = mapped_column(Float)
+    system_rank: Mapped[Optional[int]] = mapped_column(Integer)
