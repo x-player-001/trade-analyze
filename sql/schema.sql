@@ -105,7 +105,7 @@ CREATE TABLE IF NOT EXISTS pick_snapshot (
   trade_date         DATE        NOT NULL,
   code               VARCHAR(10) NOT NULL,
   name               VARCHAR(32) NOT NULL,
-  rank               INT         NOT NULL COMMENT '当日排名,1最高',
+  `rank`             INT         NOT NULL COMMENT '当日排名,1最高',
   total_score        FLOAT       NOT NULL,
   factor_scores_json TEXT        COMMENT '因子得分明细JSON',
   reasons            VARCHAR(512),
