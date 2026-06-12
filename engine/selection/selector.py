@@ -1,0 +1,212 @@
+"""选股引擎：单个交易日的 因子计算 → 硬过滤 → 评分 → Top N 快照落库。
+
+设计要点：
+- 因子对全市场每票都落 stock_factor（含被拒原因），便于复盘与调参。
+- pick_snapshot 始终写入（含大盘关闭日），是否可执行由 market_status.is_open
+  决定——这样验证闭环能诚实测出"大盘开关"的贡献(总结.txt 第135行对照组要求)。
+  前端展示时 join market_status，关闭日标注"空仓不操作"。
+- 快照只写不改：同 (trade_date, code) 已存在则跳过，绝不覆盖。
+- 当日涨停的票标记 tradable=False（尾盘买不进，总结.txt 第129行）。
+"""
+from __future__ import annotations
+
+import json
+from datetime import date
+
+import pandas as pd
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from common.logging_conf import get_logger
+from common.models import DailyQuote, PickSnapshot, StockBasic, StockFactor
+from common.upsert import bulk_upsert
+from engine.factors import soft_score as ss
+from engine.factors.chip import score_chip
+from engine.factors.hard_filter import hard_filter_stock, in_pullback_window
+from engine.factors.market import compute_market_status
+
+log = get_logger("selection")
+
+# 因子名 → (StockFactor列名, 权重key, 中文理由)
+FACTOR_DEFS = [
+    ("score_low_position", "low_position", "低位刚启动"),
+    ("score_shrink_consolidation", "shrink_consolidation", "缩量横盘"),
+    ("score_probe_pullback", "probe_pullback", "试盘后回踩"),
+    ("score_small_yang", "small_yang", "连续小阳"),
+    ("score_confirm_prev_high", "confirm_prev_high", "回踩确认前高"),
+    ("score_pullback_ma5", "pullback_ma5", "回踩5日线"),
+    ("score_healthy_turnover", "healthy_turnover", "换手健康"),
+    ("score_strong_rally", "strong_rally", "拉升有力"),
+    ("score_chip_concentration", "chip_concentration", "筹码集中"),
+    ("score_sector_strength", "sector_strength", "强于大盘"),
+]
+
+WINDOW_DAYS = 140  # 因子所需最长回看窗口(交易日)
+
+
+def _load_quotes_window(session: Session, trade_date: date) -> pd.DataFrame:
+    """加载全市场截至 trade_date 的近 WINDOW_DAYS 个交易日行情。"""
+    # 先取窗口起始日期
+    dates = session.scalars(
+        select(DailyQuote.trade_date)
+        .where(DailyQuote.trade_date <= trade_date)
+        .distinct()
+        .order_by(DailyQuote.trade_date.desc())
+        .limit(WINDOW_DAYS)
+    ).all()
+    if not dates:
+        return pd.DataFrame()
+    start = min(dates)
+    rows = session.execute(
+        select(
+            DailyQuote.code, DailyQuote.trade_date, DailyQuote.open, DailyQuote.high,
+            DailyQuote.low, DailyQuote.close, DailyQuote.raw_close, DailyQuote.volume,
+            DailyQuote.amount, DailyQuote.pct_chg, DailyQuote.turnover,
+        ).where(DailyQuote.trade_date >= start, DailyQuote.trade_date <= trade_date)
+    ).all()
+    df = pd.DataFrame(
+        rows,
+        columns=["code", "trade_date", "open", "high", "low", "close", "raw_close",
+                 "volume", "amount", "pct_chg", "turnover"],
+    )
+    return df.sort_values(["code", "trade_date"]).reset_index(drop=True)
+
+
+def compute_one_stock(
+    sdf: pd.DataFrame,
+    params: dict,
+    *,
+    basic: StockBasic | None,
+    market_pct: float | None,
+    has_negative_event: bool = False,
+) -> dict:
+    """单票因子计算，返回 stock_factor 行 dict（不含 code/trade_date）。"""
+    is_st = bool(basic.is_st) if basic else False
+    circ_mv = basic.circ_mv if basic else None
+
+    passed, reject = hard_filter_stock(
+        sdf, params, is_st=is_st, circ_mv=circ_mv, has_negative_event=has_negative_event
+    )
+    pullback = in_pullback_window(sdf, params) if passed else False
+
+    scores = dict.fromkeys((col for col, _, _ in FACTOR_DEFS), 0.0)
+    total = 0.0
+    if passed and pullback:
+        today_pct = sdf.iloc[-1]["pct_chg"]
+        scores["score_low_position"] = ss.score_low_position(sdf, params)
+        scores["score_shrink_consolidation"] = ss.score_shrink_consolidation(sdf, params)
+        scores["score_probe_pullback"] = ss.score_probe_pullback(sdf, params)
+        scores["score_small_yang"] = ss.score_small_yang(sdf, params)
+        scores["score_confirm_prev_high"] = ss.score_confirm_prev_high(sdf, params)
+        scores["score_pullback_ma5"] = ss.score_pullback_ma5(sdf, params)
+        scores["score_healthy_turnover"] = ss.score_healthy_turnover(sdf, params)
+        scores["score_strong_rally"] = ss.score_strong_rally(sdf, params)
+        scores["score_chip_concentration"] = score_chip(sdf, params)
+        scores["score_sector_strength"] = ss.score_sector_strength(
+            float(today_pct) if pd.notna(today_pct) else None, market_pct
+        )
+        weights = params["weights"]
+        wsum = sum(weights.values())
+        total = sum(
+            scores[col] * weights[wkey] for col, wkey, _ in FACTOR_DEFS
+        ) / wsum if wsum > 0 else 0.0
+
+    return dict(
+        passed_hard_filter=passed,
+        reject_reasons=",".join(reject) if reject else None,
+        in_pullback_window=pullback,
+        total_score=round(total, 4),
+        **scores,
+    )
+
+
+def _is_limit_up(row: pd.Series, limit_pct: float) -> bool:
+    """近似判断当日涨停：涨幅达到限制-0.3% 以内。"""
+    pct = row["pct_chg"]
+    return pd.notna(pct) and pct >= limit_pct - 0.3
+
+
+def run_selection(
+    session: Session,
+    trade_date: date,
+    params: dict,
+    param_version: str,
+    negative_codes: set[str] | None = None,
+) -> list[dict]:
+    """执行某交易日选股全流程，返回写入的快照行（已存在则返回空）。"""
+    negative_codes = negative_codes or set()
+
+    # 1. 大盘开关
+    ms = compute_market_status(session, trade_date, params)
+    log.info("%s 大盘开关: %s (%s)", trade_date, "开" if ms.is_open else "关", ms.reason or "正常")
+
+    # 2. 加载行情窗口
+    df = _load_quotes_window(session, trade_date)
+    if df.empty:
+        log.warning("%s 无行情数据", trade_date)
+        return []
+    market_pct = ms.sh_pct_chg
+
+    basics = {b.code: b for b in session.scalars(select(StockBasic)).all()}
+
+    # 3. 逐票计算因子
+    factor_rows = []
+    candidates = []
+    for code, sdf in df.groupby("code"):
+        sdf = sdf.reset_index(drop=True)
+        if sdf.iloc[-1]["trade_date"] != trade_date:
+            continue  # 当日停牌/无数据
+        row = compute_one_stock(
+            sdf, params,
+            basic=basics.get(code),
+            market_pct=market_pct,
+            has_negative_event=code in negative_codes,
+        )
+        factor_rows.append(dict(code=code, trade_date=trade_date, param_version=param_version, **row))
+        if row["passed_hard_filter"] and row["in_pullback_window"] and row["total_score"] > 0:
+            candidates.append((code, row, sdf.iloc[-1]))
+
+    bulk_upsert(session, StockFactor, factor_rows)
+    log.info("%s 因子落库 %d 票, 硬过滤通过 %d, 候选 %d",
+             trade_date, len(factor_rows),
+             sum(1 for r in factor_rows if r["passed_hard_filter"]), len(candidates))
+
+    # 4. 快照只写不改：当日已有则跳过
+    existing = session.scalar(
+        select(PickSnapshot.id).where(PickSnapshot.trade_date == trade_date).limit(1)
+    )
+    if existing is not None:
+        log.info("%s 快照已存在，跳过（只写不改）", trade_date)
+        return []
+
+    # 5. Top N 落快照
+    top_n = params["selection"]["top_n"]
+    candidates.sort(key=lambda x: x[1]["total_score"], reverse=True)
+    snapshot_rows = []
+    for rank, (code, row, last) in enumerate(candidates[:top_n], start=1):
+        basic = basics.get(code)
+        limit_pct = basic.price_limit_pct if basic else 10.0
+        limit_up = _is_limit_up(last, limit_pct)
+        reasons = "、".join(
+            label for col, _, label in FACTOR_DEFS if row[col] >= 0.5
+        )
+        snapshot_rows.append(dict(
+            trade_date=trade_date,
+            code=code,
+            name=basic.name if basic else code,
+            rank=rank,
+            total_score=row["total_score"],
+            factor_scores_json=json.dumps(
+                {col: row[col] for col, _, _ in FACTOR_DEFS}, ensure_ascii=False
+            ),
+            reasons=reasons or None,
+            decision_close=float(last["close"]),
+            decision_raw_close=float(last["raw_close"]) if pd.notna(last["raw_close"]) else None,
+            limit_up=limit_up,
+            tradable=not limit_up,
+            param_version=param_version,
+        ))
+    if snapshot_rows:
+        bulk_upsert(session, PickSnapshot, snapshot_rows)
+    log.info("%s 选出 %d 票入快照", trade_date, len(snapshot_rows))
+    return snapshot_rows

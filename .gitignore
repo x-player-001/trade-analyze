@@ -1,0 +1,25 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.env
+logs/
+*.log
+.pytest_cache/
+.ruff_cache/
+.idea/
+.vscode/
+*.parquet
+
+# 选股逻辑分析的原始数据（实盘截图/评论），不入库
+独自前行/
+
+# Claude 本地记忆，非项目代码
+memory/
+
+# Claude 本地权限配置
+.claude/settings.local.json
