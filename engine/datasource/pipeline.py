@@ -25,12 +25,25 @@ log = get_logger("datasource.pipeline")
 INDEX_CODES = ["sh000001", "sz399006"]
 
 
+def _to_clean_records(df: pd.DataFrame) -> list[dict]:
+    """DataFrame → records，把所有 NaN/NaT 转成 None（PyMySQL 不接受 NaN）。
+
+    注意：不能用 df.where(notna, None)，float 列会把 None 又还原成 NaN。
+    这里转成 object 后逐值清洗，确保送进 PyMySQL 的是真正的 None。
+    """
+    records = df.astype(object).to_dict("records")
+    cleaned = []
+    for r in records:
+        cleaned.append({k: (None if pd.isna(v) else v) for k, v in r.items()})
+    return cleaned
+
+
 def sync_stock_basic(ds: DataSource) -> int:
     df = ds.fetch_stock_basic()
     if df.empty:
         log.warning("基础信息为空，跳过")
         return 0
-    rows = df.to_dict("records")
+    rows = _to_clean_records(df)
     with session_scope() as s:
         n = bulk_upsert(s, StockBasic, rows)
     log.info("stock_basic 落库 %d 行", n)
@@ -57,7 +70,7 @@ def _sync_one_daily(ds: DataSource, code: str, end: date, full: bool) -> int:
     if df.empty:
         return 0
     df = df.assign(code=code)
-    rows = df.where(pd.notna(df), None).to_dict("records")
+    rows = _to_clean_records(df)
     with session_scope() as s:
         return bulk_upsert(s, DailyQuote, rows)
 
@@ -97,7 +110,7 @@ def sync_index(ds: DataSource, end: date | None = None, full: bool = False) -> i
         if df.empty:
             continue
         df = df.assign(index_code=idx)
-        rows = df.where(pd.notna(df), None).to_dict("records")
+        rows = _to_clean_records(df)
         with session_scope() as s:
             total += bulk_upsert(s, IndexDaily, rows)
     log.info("指数同步完成: %d 行", total)

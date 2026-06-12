@@ -49,7 +49,14 @@ def bulk_upsert(
         chunk = rows[i : i + chunk_size]
         if dialect == "mysql":
             stmt = mysql_insert(model).values(chunk)
-            set_map = {c: stmt.inserted[c] for c in update_cols if c in all_cols}
+            # 用 stmt.inserted[c]（VALUES()/别名 形式）引用待插入值。
+            # updated_at 让 onupdate=func.now() 自然触发，不显式放进 set_map，
+            # 避免 SQLAlchemy 生成 MySQL 8.0.26 不支持的 `new.updated_at` 引用。
+            set_map = {
+                c: stmt.inserted[c]
+                for c in update_cols
+                if c in all_cols and c != "updated_at"
+            }
             stmt = stmt.on_duplicate_key_update(**set_map)
         elif dialect == "sqlite":
             stmt = sqlite_insert(model).values(chunk)
