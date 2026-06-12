@@ -32,6 +32,8 @@ class Settings(BaseSettings):
     history_start_date: str = "2023-01-01"
     fetch_max_workers: int = 4
     fetch_sleep_seconds: float = 0.2
+    # 单次数据请求超时(秒)，防止 akshare 卡住线程池
+    fetch_request_timeout: float = 30.0
 
     # API
     api_host: str = "0.0.0.0"

@@ -5,11 +5,13 @@ akshare 接口字段经常变动，这里集中做列名标准化和容错。任
 """
 from __future__ import annotations
 
+import socket
 from datetime import date
 
 import pandas as pd
 from tenacity import retry, stop_after_attempt, wait_fixed
 
+from common.config import settings
 from common.logging_conf import get_logger
 from engine.datasource.base import DataSource
 from engine.datasource.classify import classify_board, is_st_name, price_limit_pct
@@ -17,6 +19,10 @@ from engine.datasource.classify import classify_board, is_st_name, price_limit_p
 log = get_logger("datasource.akshare")
 
 _RETRY = dict(stop=stop_after_attempt(3), wait=wait_fixed(1), reraise=True)
+
+# 全局 socket 超时兜底：akshare 内部 requests 不传 timeout 时会无限挂起，
+# 卡死线程池拖停整个拉取。设全局默认超时，卡住的请求会抛异常被 _RETRY 接住。
+socket.setdefaulttimeout(settings.fetch_request_timeout)
 
 
 def _to_date(s) -> date | None:
