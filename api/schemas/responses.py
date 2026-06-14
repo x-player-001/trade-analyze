@@ -117,16 +117,21 @@ class ParamVersionOut(ORMModel):
 
 # ---------------- K线 ----------------
 class KlineBar(ORMModel):
-    """单根K线。OHLC 默认后复权(与选股因子一致),raw_close 为原始收盘。"""
+    """单根K线。默认 OHLC 后复权(与选股因子一致),raw_* 为原始价(真实成交价)。"""
     trade_date: date
     open: float
     high: float
     low: float
     close: float
+    raw_open: Optional[float] = None
+    raw_high: Optional[float] = None
+    raw_low: Optional[float] = None
     raw_close: Optional[float] = None
     volume: Optional[float] = None
     amount: Optional[float] = None
+    amplitude: Optional[float] = None
     pct_chg: Optional[float] = None
+    change_amt: Optional[float] = None
     turnover: Optional[float] = None
 
 

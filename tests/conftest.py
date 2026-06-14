@@ -68,18 +68,26 @@ def make_quotes(
         hi = c * (1 + intraday_range)
         lo = c * (1 - intraday_range)
         o = prev if prev else c
+        hi_v = round(max(hi, c, o), 3)
+        lo_v = round(min(lo, c, o), 3)
         rows.append(
             dict(
                 code=code,
                 trade_date=d,
                 open=round(o, 3),
-                high=round(max(hi, c, o), 3),
-                low=round(min(lo, c, o), 3),
+                high=hi_v,
+                low=lo_v,
                 close=round(c, 3),
+                # 测试中后复权=原始(简化)
+                raw_open=round(o, 3),
+                raw_high=hi_v,
+                raw_low=lo_v,
                 raw_close=round(c, 3),
                 volume=(volume[i] if volume else 1.0e6),
                 amount=amount_each,
+                amplitude=round((hi_v - lo_v) / prev * 100, 3) if prev else 0.0,
                 pct_chg=round(pct, 3),
+                change_amt=round(c - prev, 3) if prev else 0.0,
                 turnover=(turnover[i] if turnover else 15.0),
             )
         )

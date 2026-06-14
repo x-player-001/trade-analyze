@@ -53,12 +53,10 @@ def kline(
     for r in rows:
         bar = KlineBar.model_validate(r)
         if adjust == "none" and r.raw_close is not None:
-            # 原始价模式:close 用原始收盘。OHLC 其余字段库内只存后复权,
-            # 这里按比例换算 open/high/low 到原始量纲,保持当日形态。
-            ratio = r.raw_close / r.close if r.close else 1.0
-            bar.open = round(r.open * ratio, 3)
-            bar.high = round(r.high * ratio, 3)
-            bar.low = round(r.low * ratio, 3)
+            # 原始价模式:直接用库内存的原始 OHLC(与 akshare 源零误差)。
+            bar.open = r.raw_open if r.raw_open is not None else r.open
+            bar.high = r.raw_high if r.raw_high is not None else r.high
+            bar.low = r.raw_low if r.raw_low is not None else r.low
             bar.close = r.raw_close
         bars.append(bar)
 

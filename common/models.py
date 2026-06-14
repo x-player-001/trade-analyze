@@ -82,16 +82,21 @@ class DailyQuote(Base):
     id: Mapped[int] = mapped_column(BigIntPK, primary_key=True, autoincrement=True)
     code: Mapped[str] = mapped_column(String(10), nullable=False, index=True)
     trade_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
-    # 后复权 OHLC
+    # 后复权 OHLC（选股因子用，形态准）
     open: Mapped[float] = mapped_column(Float, nullable=False)
     high: Mapped[float] = mapped_column(Float, nullable=False)
     low: Mapped[float] = mapped_column(Float, nullable=False)
     close: Mapped[float] = mapped_column(Float, nullable=False)
-    # 原始未复权收盘（展示用）
-    raw_close: Mapped[Optional[float]] = mapped_column(Float)
+    # 原始未复权 OHLC（真实成交价，展示/图片识别用，与 akshare 源零误差）
+    raw_open: Mapped[Optional[float]] = mapped_column(Float, comment="原始开盘")
+    raw_high: Mapped[Optional[float]] = mapped_column(Float, comment="原始最高")
+    raw_low: Mapped[Optional[float]] = mapped_column(Float, comment="原始最低")
+    raw_close: Mapped[Optional[float]] = mapped_column(Float, comment="原始收盘")
     volume: Mapped[float] = mapped_column(Float, comment="成交量(手)")
     amount: Mapped[float] = mapped_column(Float, comment="成交额(元)")
+    amplitude: Mapped[Optional[float]] = mapped_column(Float, comment="振幅(%)")
     pct_chg: Mapped[Optional[float]] = mapped_column(Float, comment="涨跌幅(%)")
+    change_amt: Mapped[Optional[float]] = mapped_column(Float, comment="涨跌额(原始)")
     turnover: Mapped[Optional[float]] = mapped_column(Float, comment="换手率(%)")
 
 

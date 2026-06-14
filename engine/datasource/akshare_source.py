@@ -93,11 +93,13 @@ class AkshareSource(DataSource):
                 "收盘": "close",
                 "成交量": "volume",
                 "成交额": "amount",
+                "振幅": "amplitude",
                 "涨跌幅": "pct_chg",
+                "涨跌额": "change_amt",
                 "换手率": "turnover",
             }
         )
-        # 同步拉一份不复权收盘作为展示价
+        # 同步拉一份不复权(原始价)：取完整 OHLC 作为真实成交价(与源零误差)
         raw = self.ak.stock_zh_a_hist(
             symbol=code,
             period="daily",
@@ -105,16 +107,23 @@ class AkshareSource(DataSource):
             end_date=end.strftime("%Y%m%d"),
             adjust="",
         )
-        raw_close_map = {}
-        if raw is not None and not raw.empty:
-            raw = raw.rename(columns={"日期": "trade_date", "收盘": "raw_close"})
-            raw_close_map = dict(zip(pd.to_datetime(raw["trade_date"]).dt.date, raw["raw_close"]))
-
         df["trade_date"] = pd.to_datetime(df["trade_date"]).dt.date
-        df["raw_close"] = df["trade_date"].map(raw_close_map)
+        for col in ("raw_open", "raw_high", "raw_low", "raw_close"):
+            df[col] = None
+        if raw is not None and not raw.empty:
+            raw = raw.rename(columns={
+                "日期": "trade_date", "开盘": "raw_open", "最高": "raw_high",
+                "最低": "raw_low", "收盘": "raw_close",
+            })
+            raw["trade_date"] = pd.to_datetime(raw["trade_date"]).dt.date
+            raw_idx = raw.set_index("trade_date")
+            for col in ("raw_open", "raw_high", "raw_low", "raw_close"):
+                df[col] = df["trade_date"].map(raw_idx[col])
+
         cols = [
-            "trade_date", "open", "high", "low", "close", "raw_close",
-            "volume", "amount", "pct_chg", "turnover",
+            "trade_date", "open", "high", "low", "close",
+            "raw_open", "raw_high", "raw_low", "raw_close",
+            "volume", "amount", "amplitude", "pct_chg", "change_amt", "turnover",
         ]
         for c in cols:
             if c not in df.columns:

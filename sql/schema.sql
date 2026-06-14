@@ -31,19 +31,24 @@ CREATE TABLE IF NOT EXISTS daily_quote (
   code        VARCHAR(10)  NOT NULL,
   trade_date  DATE         NOT NULL,
   open        FLOAT        NOT NULL,
-  high        FLOAT        NOT NULL,
-  low         FLOAT        NOT NULL,
+  high        FLOAT        NOT NULL COMMENT '后复权最高',
+  low         FLOAT        NOT NULL COMMENT '后复权最低',
   close       FLOAT        NOT NULL COMMENT '后复权收盘',
-  raw_close   FLOAT                 COMMENT '原始未复权收盘',
+  raw_open    FLOAT                 COMMENT '原始开盘',
+  raw_high    FLOAT                 COMMENT '原始最高',
+  raw_low     FLOAT                 COMMENT '原始最低',
+  raw_close   FLOAT                 COMMENT '原始收盘',
   volume      FLOAT                 COMMENT '成交量(手)',
   amount      FLOAT                 COMMENT '成交额(元)',
+  amplitude   FLOAT                 COMMENT '振幅(%)',
   pct_chg     FLOAT                 COMMENT '涨跌幅(%)',
+  change_amt  FLOAT                 COMMENT '涨跌额(原始)',
   turnover    FLOAT                 COMMENT '换手率(%)',
   PRIMARY KEY (id),
   UNIQUE KEY uq_daily_code_date (code, trade_date),
   KEY idx_daily_code (code),
   KEY idx_daily_date (trade_date)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='日线后复权行情';
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='日线行情(后复权+原始OHLC)';
 
 CREATE TABLE IF NOT EXISTS index_daily (
   id          BIGINT       NOT NULL AUTO_INCREMENT,

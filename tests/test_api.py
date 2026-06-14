@@ -181,8 +181,10 @@ def _seed_kline(session):
                            price_limit_pct=10.0, is_st=False, is_active=True))
     closes = [10.0, 10.2, 10.1, 10.3, 10.5, 10.4, 10.6, 10.8, 10.7, 10.9]
     rows = make_quotes("600001", date(2026, 6, 1), closes)
-    # 给最后一根设置原始收盘=后复权的一半(模拟复权差异)
-    rows[-1]["raw_close"] = rows[-1]["close"] / 2
+    # 给最后一根设置原始 OHLC=后复权的一半(模拟复权差异),验证原始价直接取自库
+    last = rows[-1]
+    for f in ("raw_open", "raw_high", "raw_low", "raw_close"):
+        last[f] = round(last[f.replace("raw_", "")] / 2, 3)
     bulk_upsert(session, DailyQuote, rows)
     mark_date = rows[5]["trade_date"]
     session.add(PickSnapshot(
@@ -243,8 +245,11 @@ def test_kline_adjust_none(client, session):
     r = client.get("/api/quotes/600001/kline", params={"adjust": "none"})
     assert r.status_code == 200
     bars = r.json()["bars"]
-    # 最后一根 raw_close=后复权的一半,原始价模式 close 应取原始值
-    assert bars[-1]["close"] == round(10.9 / 2, 3)
+    # 最后一根原始OHLC=后复权的一半,原始价模式 OHLC 应直接取库内原始值
+    last = bars[-1]
+    assert last["close"] == round(10.9 / 2, 3)   # 原始收盘
+    assert last["open"] == round(10.7 / 2, 3)    # 原始开盘(make_quotes: open=前收10.7)
+    assert last["high"] == round(10.9 / 2, 3)    # 原始最高(=close)
 
 
 def test_kline_404(client, session):
