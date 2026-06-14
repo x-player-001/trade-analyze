@@ -109,6 +109,32 @@ def test_daily_picks_grouped(client, session):
     assert body["main"][0]["rank"] == 1 and body["other"][0]["rank"] == 1
 
 
+def test_also_in_versions(client, session):
+    """双选标识:某票v1v2都选→also_in_versions带另一版本;单选→空。"""
+    session.add(StockBasic(code="600001", name="双选票", board="main",
+                           price_limit_pct=10.0, is_st=False, is_active=True))
+    session.add(StockBasic(code="600002", name="仅v1票", board="main",
+                           price_limit_pct=10.0, is_st=False, is_active=True))
+    session.add(MarketStatus(trade_date=D, below_ma20=False, is_open=True))
+
+    def snap(code, ver, rank):
+        return PickSnapshot(
+            trade_date=D, code=code, name=code, board_group="main", rank=rank,
+            total_score=0.7, factor_scores_json="{}", reasons="x",
+            decision_close=10.0, decision_raw_close=10.0, limit_up=False,
+            tradable=True, param_version=ver,
+        )
+    # 600001 被 v1+v2 双选; 600002 仅 v1
+    session.add_all([snap("600001", "v1", 1), snap("600001", "v2", 1),
+                     snap("600002", "v1", 2)])
+    session.commit()
+
+    body = client.get("/api/picks/daily", params={"date": str(D), "version": "v1"}).json()
+    picks = {p["code"]: p for p in body["picks"]}
+    assert picks["600001"]["also_in_versions"] == ["v2"]   # 双选
+    assert picks["600002"]["also_in_versions"] == []        # 仅v1
+
+
 def test_daily_picks_default_latest(client, seed_api_data):
     r = client.get("/api/picks/daily")
     assert r.status_code == 200

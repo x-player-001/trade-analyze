@@ -49,8 +49,20 @@ def daily_picks(
                PickSnapshot.param_version == version)
         .order_by(PickSnapshot.board_group, PickSnapshot.rank)
     ).all()
+    # 当天每只票被哪些版本选中(用于标注双选/单选)
+    ver_rows = session.execute(
+        select(PickSnapshot.code, PickSnapshot.param_version)
+        .where(PickSnapshot.trade_date == trade_date)
+    ).all()
+    code_versions: dict[str, set[str]] = {}
+    for code, ver in ver_rows:
+        code_versions.setdefault(code, set()).add(ver)
+
     ms = session.get(MarketStatus, trade_date)
     picks = [_to_pick_out(s) for s in snaps]
+    for p in picks:
+        # 该票还被哪些"其他"版本选中(排除当前版本)
+        p.also_in_versions = sorted(code_versions.get(p.code, set()) - {version})
     main = [p for p in picks if p.board_group == "main"]
     other = [p for p in picks if p.board_group == "other"]
     return DailyPicksOut(

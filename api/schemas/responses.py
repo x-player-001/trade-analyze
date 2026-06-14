@@ -36,6 +36,8 @@ class PickOut(ORMModel):
     limit_up: bool
     tradable: bool
     param_version: str
+    # 当天该票还被哪些其他版本选中(空=仅当前版本选中;["v2"]=v1v2双选)
+    also_in_versions: List[str] = []
 
 
 class DailyPicksOut(BaseModel):
