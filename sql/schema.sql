@@ -98,7 +98,7 @@ CREATE TABLE IF NOT EXISTS stock_factor (
   total_score                 FLOAT       NOT NULL DEFAULT 0,
   param_version               VARCHAR(16) NOT NULL,
   PRIMARY KEY (id),
-  UNIQUE KEY uq_factor_code_date (code, trade_date),
+  UNIQUE KEY uq_factor_code_date_ver (code, trade_date, param_version),
   KEY idx_factor_code (code),
   KEY idx_factor_date (trade_date),
   KEY idx_factor_passed (passed_hard_filter),
@@ -123,7 +123,7 @@ CREATE TABLE IF NOT EXISTS pick_snapshot (
   created_at         DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at         DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (id),
-  UNIQUE KEY uq_pick_date_code (trade_date, code),
+  UNIQUE KEY uq_pick_date_code_ver (trade_date, code, param_version),
   KEY idx_pick_date (trade_date),
   KEY idx_pick_code (code),
   KEY idx_pick_group (board_group)

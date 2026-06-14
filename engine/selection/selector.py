@@ -176,12 +176,15 @@ def run_selection(
              trade_date, len(factor_rows),
              sum(1 for r in factor_rows if r["passed_hard_filter"]), len(candidates))
 
-    # 4. 快照只写不改：当日已有则跳过
+    # 4. 快照只写不改：当日该参数版本已有则跳过(不同版本可并存)
     existing = session.scalar(
-        select(PickSnapshot.id).where(PickSnapshot.trade_date == trade_date).limit(1)
+        select(PickSnapshot.id).where(
+            PickSnapshot.trade_date == trade_date,
+            PickSnapshot.param_version == param_version,
+        ).limit(1)
     )
     if existing is not None:
-        log.info("%s 快照已存在，跳过（只写不改）", trade_date)
+        log.info("%s 快照已存在(版本%s),跳过(只写不改)", trade_date, param_version)
         return []
 
     # 5. 分组取 Top N 落快照：主板(main) 与 非主板(other) 各独立排名取 top_n

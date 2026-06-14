@@ -148,7 +148,7 @@ class StockFactor(Base):
 
     __tablename__ = "stock_factor"
     __table_args__ = (
-        UniqueConstraint("code", "trade_date", name="uq_factor_code_date"),
+        UniqueConstraint("code", "trade_date", "param_version", name="uq_factor_code_date_ver"),
     )
 
     id: Mapped[int] = mapped_column(BigIntPK, primary_key=True, autoincrement=True)
@@ -186,7 +186,7 @@ class PickSnapshot(Base, TimestampMixin):
 
     __tablename__ = "pick_snapshot"
     __table_args__ = (
-        UniqueConstraint("trade_date", "code", name="uq_pick_date_code"),
+        UniqueConstraint("trade_date", "code", "param_version", name="uq_pick_date_code_ver"),
     )
 
     id: Mapped[int] = mapped_column(BigIntPK, primary_key=True, autoincrement=True)
