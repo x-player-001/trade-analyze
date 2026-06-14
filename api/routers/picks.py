@@ -42,14 +42,19 @@ def daily_picks(
     snaps = session.scalars(
         select(PickSnapshot)
         .where(PickSnapshot.trade_date == trade_date)
-        .order_by(PickSnapshot.rank)
+        .order_by(PickSnapshot.board_group, PickSnapshot.rank)
     ).all()
     ms = session.get(MarketStatus, trade_date)
+    picks = [_to_pick_out(s) for s in snaps]
+    main = [p for p in picks if p.board_group == "main"]
+    other = [p for p in picks if p.board_group == "other"]
     return DailyPicksOut(
         trade_date=trade_date,
         market=MarketStatusOut.model_validate(ms) if ms else None,
         actionable=bool(ms.is_open) if ms else True,
-        picks=[_to_pick_out(s) for s in snaps],
+        main=main,
+        other=other,
+        picks=picks,
     )
 
 

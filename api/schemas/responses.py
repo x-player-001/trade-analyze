@@ -27,6 +27,7 @@ class PickOut(ORMModel):
     trade_date: date
     code: str
     name: str
+    board_group: str          # main=主板 / other=非主板
     rank: int
     total_score: float
     factor_scores: Dict[str, float] = {}
@@ -40,8 +41,10 @@ class PickOut(ORMModel):
 class DailyPicksOut(BaseModel):
     trade_date: date
     market: Optional[MarketStatusOut] = None
-    actionable: bool          # 大盘开关打开才可执行
-    picks: List[PickOut]
+    actionable: bool                 # 大盘开关打开才可执行
+    main: List[PickOut]              # 主板 Top N
+    other: List[PickOut]             # 非主板(创业板/科创板/北交所) Top N
+    picks: List[PickOut]             # 全部(兼容旧前端,main+other 合并)
 
 
 # ---------------- 个股明细 ----------------

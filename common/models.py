@@ -180,7 +180,11 @@ class PickSnapshot(Base, TimestampMixin):
     trade_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
     code: Mapped[str] = mapped_column(String(10), nullable=False, index=True)
     name: Mapped[str] = mapped_column(String(32), nullable=False)
-    rank: Mapped[int] = mapped_column(Integer, nullable=False, comment="当日排名,1最高")
+    # 板块分组：main=主板 / other=非主板(创业板/科创板/北交所)。各组独立排名取TopN
+    board_group: Mapped[str] = mapped_column(
+        String(8), nullable=False, default="main", index=True, comment="板块分组 main/other"
+    )
+    rank: Mapped[int] = mapped_column(Integer, nullable=False, comment="组内排名,1最高")
     total_score: Mapped[float] = mapped_column(Float, nullable=False)
     # 各因子得分快照（JSON 字符串，便于前端展示理由）
     factor_scores_json: Mapped[str] = mapped_column(Text, comment="因子得分明细JSON")

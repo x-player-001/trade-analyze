@@ -79,8 +79,34 @@ def test_daily_picks(client, seed_api_data):
     assert len(body["picks"]) == 1
     p = body["picks"][0]
     assert p["code"] == "600001" and p["rank"] == 1
+    assert p["board_group"] == "main"
     assert p["factor_scores"]["score_confirm_prev_high"] == 1.0
     assert "回踩" in p["reasons"]
+    # 分组返回:600001 是主板,落在 main 组,other 为空
+    assert len(body["main"]) == 1 and body["main"][0]["code"] == "600001"
+    assert body["other"] == []
+
+
+def test_daily_picks_grouped(client, session):
+    """主板与非主板分两组返回,各自独立排名。"""
+    session.add(StockBasic(code="600001", name="主板票", board="main",
+                           price_limit_pct=10.0, is_st=False, is_active=True))
+    session.add(StockBasic(code="300001", name="创业板票", board="gem",
+                           price_limit_pct=20.0, is_st=False, is_active=True))
+    session.add(MarketStatus(trade_date=D, below_ma20=False, is_open=True))
+    for code, grp in [("600001", "main"), ("300001", "other")]:
+        session.add(PickSnapshot(
+            trade_date=D, code=code, name=code, board_group=grp, rank=1,
+            total_score=0.7, factor_scores_json="{}", reasons="x",
+            decision_close=10.0, decision_raw_close=10.0, limit_up=False,
+            tradable=True, param_version="v1",
+        ))
+    session.commit()
+    body = client.get("/api/picks/daily", params={"date": str(D)}).json()
+    assert len(body["main"]) == 1 and body["main"][0]["code"] == "600001"
+    assert len(body["other"]) == 1 and body["other"][0]["code"] == "300001"
+    assert len(body["picks"]) == 2          # 合并视图
+    assert body["main"][0]["rank"] == 1 and body["other"][0]["rank"] == 1
 
 
 def test_daily_picks_default_latest(client, seed_api_data):

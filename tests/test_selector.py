@@ -72,6 +72,36 @@ def test_full_selection(session, seed_basic):
     assert factors["600001"].score_confirm_prev_high > 0 or factors["600001"].score_probe_pullback > 0
 
 
+def test_board_grouping(session):
+    """主板与非主板各自独立排名取TopN：两组各自有 rank=1。"""
+    from common.models import StockBasic
+
+    n = len(_ideal_pattern())
+    vol = [1.0e6] * 74 + [2.4e6] + [0.7e6] * 4 + [0.8e6]
+    # 主板 600001 + 创业板 300001 都给理想形态(都会入选)
+    for code, board in [("600001", "main"), ("300001", "gem")]:
+        session.add(StockBasic(code=code, name=f"票{code}", board=board,
+                               price_limit_pct=(10.0 if board == "main" else 20.0),
+                               is_st=False, circ_mv=50.0, is_active=True))
+        bulk_upsert(session, DailyQuote, make_quotes(
+            code, START, _ideal_pattern(), volume=vol, turnover=[5.0] * n))
+    bulk_upsert(session, IndexDaily, make_index(SH_CODE, START, [3000 + i for i in range(n)]))
+    bulk_upsert(session, IndexDaily, make_index(GEM_CODE, START, [2000 + i for i in range(n)]))
+    session.commit()
+    trade_date = make_quotes("600001", START, _ideal_pattern())[-1]["trade_date"]
+
+    picks = run_selection(session, trade_date, DEFAULT_PARAMS, "v1")
+    session.commit()
+
+    main = [p for p in picks if p["board_group"] == "main"]
+    other = [p for p in picks if p["board_group"] == "other"]
+    assert len(main) == 1 and main[0]["code"] == "600001"
+    assert len(other) == 1 and other[0]["code"] == "300001"
+    # 两组各自从 rank=1 开始
+    assert main[0]["rank"] == 1
+    assert other[0]["rank"] == 1
+
+
 def test_snapshot_immutable(session, seed_basic):
     """同日重跑不覆盖已有快照（只写不改）。"""
     trade_date = _seed(session)

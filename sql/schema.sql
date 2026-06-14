@@ -105,7 +105,8 @@ CREATE TABLE IF NOT EXISTS pick_snapshot (
   trade_date         DATE        NOT NULL,
   code               VARCHAR(10) NOT NULL,
   name               VARCHAR(32) NOT NULL,
-  `rank`             INT         NOT NULL COMMENT '当日排名,1最高',
+  board_group        VARCHAR(8)  NOT NULL DEFAULT 'main' COMMENT '板块分组 main/other',
+  `rank`             INT         NOT NULL COMMENT '组内排名,1最高',
   total_score        FLOAT       NOT NULL,
   factor_scores_json TEXT        COMMENT '因子得分明细JSON',
   reasons            VARCHAR(512),
@@ -119,7 +120,8 @@ CREATE TABLE IF NOT EXISTS pick_snapshot (
   PRIMARY KEY (id),
   UNIQUE KEY uq_pick_date_code (trade_date, code),
   KEY idx_pick_date (trade_date),
-  KEY idx_pick_code (code)
+  KEY idx_pick_code (code),
+  KEY idx_pick_group (board_group)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='每日选股快照(只写不改)';
 
 CREATE TABLE IF NOT EXISTS pick_validation (

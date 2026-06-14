@@ -22,6 +22,7 @@ from common.models import DailyQuote, PickSnapshot, StockBasic, StockFactor
 from common.upsert import bulk_upsert
 from engine.factors import soft_score as ss
 from engine.factors.chip import score_chip
+from engine.datasource.classify import board_group
 from engine.factors.hard_filter import hard_filter_stock, in_pullback_window
 from engine.factors.market import compute_market_status
 
@@ -179,34 +180,44 @@ def run_selection(
         log.info("%s 快照已存在，跳过（只写不改）", trade_date)
         return []
 
-    # 5. Top N 落快照
+    # 5. 分组取 Top N 落快照：主板(main) 与 非主板(other) 各独立排名取 top_n
     top_n = params["selection"]["top_n"]
-    candidates.sort(key=lambda x: x[1]["total_score"], reverse=True)
-    snapshot_rows = []
-    for rank, (code, row, last) in enumerate(candidates[:top_n], start=1):
+    grouped: dict[str, list] = {"main": [], "other": []}
+    for code, row, last in candidates:
         basic = basics.get(code)
-        limit_pct = basic.price_limit_pct if basic else 10.0
-        limit_up = _is_limit_up(last, limit_pct)
-        reasons = "、".join(
-            label for col, _, label in FACTOR_DEFS if row[col] >= 0.5
-        )
-        snapshot_rows.append(dict(
-            trade_date=trade_date,
-            code=code,
-            name=basic.name if basic else code,
-            rank=rank,
-            total_score=row["total_score"],
-            factor_scores_json=json.dumps(
-                {col: row[col] for col, _, _ in FACTOR_DEFS}, ensure_ascii=False
-            ),
-            reasons=reasons or None,
-            decision_close=float(last["close"]),
-            decision_raw_close=float(last["raw_close"]) if pd.notna(last["raw_close"]) else None,
-            limit_up=limit_up,
-            tradable=not limit_up,
-            param_version=param_version,
-        ))
+        grp = board_group(basic.board) if basic else "main"
+        grouped[grp].append((code, row, last))
+
+    snapshot_rows = []
+    for grp, items in grouped.items():
+        items.sort(key=lambda x: x[1]["total_score"], reverse=True)
+        for rank, (code, row, last) in enumerate(items[:top_n], start=1):
+            basic = basics.get(code)
+            limit_pct = basic.price_limit_pct if basic else 10.0
+            limit_up = _is_limit_up(last, limit_pct)
+            reasons = "、".join(
+                label for col, _, label in FACTOR_DEFS if row[col] >= 0.5
+            )
+            snapshot_rows.append(dict(
+                trade_date=trade_date,
+                code=code,
+                name=basic.name if basic else code,
+                board_group=grp,
+                rank=rank,
+                total_score=row["total_score"],
+                factor_scores_json=json.dumps(
+                    {col: row[col] for col, _, _ in FACTOR_DEFS}, ensure_ascii=False
+                ),
+                reasons=reasons or None,
+                decision_close=float(last["close"]),
+                decision_raw_close=float(last["raw_close"]) if pd.notna(last["raw_close"]) else None,
+                limit_up=limit_up,
+                tradable=not limit_up,
+                param_version=param_version,
+            ))
     if snapshot_rows:
         bulk_upsert(session, PickSnapshot, snapshot_rows)
-    log.info("%s 选出 %d 票入快照", trade_date, len(snapshot_rows))
+    log.info("%s 选出 %d 票入快照 (主板 %d, 非主板 %d)", trade_date, len(snapshot_rows),
+             sum(1 for r in snapshot_rows if r["board_group"] == "main"),
+             sum(1 for r in snapshot_rows if r["board_group"] == "other"))
     return snapshot_rows

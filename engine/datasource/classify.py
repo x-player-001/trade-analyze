@@ -22,6 +22,11 @@ def classify_board(code: str) -> str:
     return "main"
 
 
+def board_group(board: str) -> str:
+    """板块 → 选股分组。main=主板；其余(创业板/科创板/北交所)归为 other。"""
+    return "main" if board == "main" else "other"
+
+
 def price_limit_pct(board: str, is_st: bool) -> float:
     """涨跌幅限制。
 
