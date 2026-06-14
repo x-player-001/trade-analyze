@@ -30,7 +30,10 @@ def _future_quotes(session: Session, code: str, after: date, n: int) -> pd.DataF
         .order_by(DailyQuote.trade_date)
         .limit(n)
     ).all()
-    return pd.DataFrame(rows, columns=["trade_date", "high", "low", "close", "pct_chg"])
+    df = pd.DataFrame(rows, columns=["trade_date", "high", "low", "close", "pct_chg"])
+    if not df.empty:
+        df[["high", "low", "close", "pct_chg"]] = df[["high", "low", "close", "pct_chg"]].astype(float)
+    return df
 
 
 def validate_snapshot(session: Session, snap: PickSnapshot, cost_pct: float) -> dict:

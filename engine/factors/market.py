@@ -29,6 +29,8 @@ def compute_market_status(session: Session, trade_date: date, params: dict) -> M
             .limit(25)
         ).all()
         df = pd.DataFrame(rows, columns=["trade_date", "close", "pct_chg"])
+        if not df.empty:
+            df[["close", "pct_chg"]] = df[["close", "pct_chg"]].astype(float)
         return df.sort_values("trade_date").reset_index(drop=True)
 
     sh = _index_df(SH_CODE)

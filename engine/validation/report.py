@@ -38,6 +38,7 @@ def _market_avg_t3_ret(session: Session, trade_date: date) -> float | None:
     if not base:
         return None
     base_df = pd.DataFrame(base, columns=["code", "base_close"])
+    base_df["base_close"] = base_df["base_close"].astype(float)
     # 取 T+3 收盘（第3个交易日后的收盘）
     future_dates = session.scalars(
         select(DailyQuote.trade_date).where(DailyQuote.trade_date > trade_date)
@@ -50,6 +51,7 @@ def _market_avg_t3_ret(session: Session, trade_date: date) -> float | None:
         select(DailyQuote.code, DailyQuote.close).where(DailyQuote.trade_date == t3)
     ).all()
     fut_df = pd.DataFrame(fut, columns=["code", "t3_close"])
+    fut_df["t3_close"] = fut_df["t3_close"].astype(float)
     merged = base_df.merge(fut_df, on="code")
     if merged.empty:
         return None

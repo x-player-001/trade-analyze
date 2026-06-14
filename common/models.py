@@ -18,6 +18,7 @@ from datetime import date, datetime
 from typing import Optional
 
 from sqlalchemy import (
+    DECIMAL,
     BigInteger,
     Boolean,
     Date,
@@ -33,6 +34,13 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 # SQLite 仅支持 INTEGER PRIMARY KEY 自增；MySQL 用 BIGINT。单测兼容。
 BigIntPK = BigInteger().with_variant(Integer, "sqlite")
+
+# 价格用 DECIMAL 定点数，精确保留小数（FLOAT 会把 5.12 存成 5.1199998）。
+# SQLite 测试用 Float（SQLite 无原生 DECIMAL，Float 足够测逻辑）。
+# Price: 3位小数够A股价格；Money: 成交量/额大数值2位小数。
+Price = DECIMAL(12, 3).with_variant(Float, "sqlite")
+IndexPrice = DECIMAL(14, 3).with_variant(Float, "sqlite")  # 指数点位较大
+Money = DECIMAL(20, 2).with_variant(Float, "sqlite")
 
 
 class Base(DeclarativeBase):
@@ -83,20 +91,20 @@ class DailyQuote(Base):
     code: Mapped[str] = mapped_column(String(10), nullable=False, index=True)
     trade_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
     # 后复权 OHLC（选股因子用，形态准）
-    open: Mapped[float] = mapped_column(Float, nullable=False)
-    high: Mapped[float] = mapped_column(Float, nullable=False)
-    low: Mapped[float] = mapped_column(Float, nullable=False)
-    close: Mapped[float] = mapped_column(Float, nullable=False)
+    open: Mapped[float] = mapped_column(Price, nullable=False)
+    high: Mapped[float] = mapped_column(Price, nullable=False)
+    low: Mapped[float] = mapped_column(Price, nullable=False)
+    close: Mapped[float] = mapped_column(Price, nullable=False)
     # 原始未复权 OHLC（真实成交价，展示/图片识别用，与 akshare 源零误差）
-    raw_open: Mapped[Optional[float]] = mapped_column(Float, comment="原始开盘")
-    raw_high: Mapped[Optional[float]] = mapped_column(Float, comment="原始最高")
-    raw_low: Mapped[Optional[float]] = mapped_column(Float, comment="原始最低")
-    raw_close: Mapped[Optional[float]] = mapped_column(Float, comment="原始收盘")
-    volume: Mapped[float] = mapped_column(Float, comment="成交量(手)")
-    amount: Mapped[float] = mapped_column(Float, comment="成交额(元)")
+    raw_open: Mapped[Optional[float]] = mapped_column(Price, comment="原始开盘")
+    raw_high: Mapped[Optional[float]] = mapped_column(Price, comment="原始最高")
+    raw_low: Mapped[Optional[float]] = mapped_column(Price, comment="原始最低")
+    raw_close: Mapped[Optional[float]] = mapped_column(Price, comment="原始收盘")
+    volume: Mapped[float] = mapped_column(Money, comment="成交量(手)")
+    amount: Mapped[float] = mapped_column(Money, comment="成交额(元)")
     amplitude: Mapped[Optional[float]] = mapped_column(Float, comment="振幅(%)")
     pct_chg: Mapped[Optional[float]] = mapped_column(Float, comment="涨跌幅(%)")
-    change_amt: Mapped[Optional[float]] = mapped_column(Float, comment="涨跌额(原始)")
+    change_amt: Mapped[Optional[float]] = mapped_column(Price, comment="涨跌额(原始)")
     turnover: Mapped[Optional[float]] = mapped_column(Float, comment="换手率(%)")
 
 
@@ -111,10 +119,10 @@ class IndexDaily(Base):
     id: Mapped[int] = mapped_column(BigIntPK, primary_key=True, autoincrement=True)
     index_code: Mapped[str] = mapped_column(String(10), nullable=False, index=True)
     trade_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
-    open: Mapped[float] = mapped_column(Float, nullable=False)
-    high: Mapped[float] = mapped_column(Float, nullable=False)
-    low: Mapped[float] = mapped_column(Float, nullable=False)
-    close: Mapped[float] = mapped_column(Float, nullable=False)
+    open: Mapped[float] = mapped_column(IndexPrice, nullable=False)
+    high: Mapped[float] = mapped_column(IndexPrice, nullable=False)
+    low: Mapped[float] = mapped_column(IndexPrice, nullable=False)
+    close: Mapped[float] = mapped_column(IndexPrice, nullable=False)
     pct_chg: Mapped[Optional[float]] = mapped_column(Float)
 
 
@@ -196,8 +204,8 @@ class PickSnapshot(Base, TimestampMixin):
     # 命中理由文本（人类可读）
     reasons: Mapped[Optional[str]] = mapped_column(String(512))
     # 决策时点价格（后复权收盘 + 原始收盘）
-    decision_close: Mapped[float] = mapped_column(Float, comment="后复权收盘")
-    decision_raw_close: Mapped[Optional[float]] = mapped_column(Float, comment="原始收盘(展示)")
+    decision_close: Mapped[float] = mapped_column(Price, comment="后复权收盘")
+    decision_raw_close: Mapped[Optional[float]] = mapped_column(Price, comment="原始收盘(展示)")
     # 当日是否涨停（涨停则次日难买入，标记不可成交）
     limit_up: Mapped[bool] = mapped_column(Boolean, default=False)
     tradable: Mapped[bool] = mapped_column(Boolean, default=True, comment="是否可模拟成交")

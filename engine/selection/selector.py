@@ -70,6 +70,10 @@ def _load_quotes_window(session: Session, trade_date: date) -> pd.DataFrame:
         columns=["code", "trade_date", "open", "high", "low", "close", "raw_close",
                  "volume", "amount", "pct_chg", "turnover"],
     )
+    # DECIMAL 列从库里取出是 Decimal，转 float 供 pandas/numpy 数值运算
+    num_cols = ["open", "high", "low", "close", "raw_close",
+                "volume", "amount", "pct_chg", "turnover"]
+    df[num_cols] = df[num_cols].astype(float)
     return df.sort_values(["code", "trade_date"]).reset_index(drop=True)
 
 
