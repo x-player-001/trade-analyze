@@ -180,3 +180,13 @@ def score_sector_strength(stock_pct: float | None, market_pct: float | None) -> 
         return 0.0
     diff = stock_pct - market_pct
     return round(min(1.0, max(0.0, (diff + 0.5) / 1.5)), 4)
+
+
+def score_industry_strength(industry_pct: float | None, market_pct: float | None) -> float:
+    """所属行业当日相对大盘强弱:行业平均涨幅跑赢大盘 → 板块轮动到位加分。
+    「个股不能脱离大环境看」「所属行业当日跑赢大盘加分」(总结.txt 第108行)。
+    行业跑赢大盘1.5%满分,持平0分。"""
+    if industry_pct is None or market_pct is None:
+        return 0.0
+    diff = industry_pct - market_pct
+    return round(min(1.0, max(0.0, diff / 1.5)), 4)

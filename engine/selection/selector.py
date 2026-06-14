@@ -84,8 +84,10 @@ def compute_one_stock(
     basic: StockBasic | None,
     market_pct: float | None,
     has_negative_event: bool = False,
+    industry_pct: float | None = None,
 ) -> dict:
-    """单票因子计算，返回 stock_factor 行 dict（不含 code/trade_date）。"""
+    """单票因子计算，返回 stock_factor 行 dict（不含 code/trade_date）。
+    industry_pct: 该票所属行业当日平均涨幅(v2 板块因子用);None 时回退到个股vs大盘。"""
     is_st = bool(basic.is_st) if basic else False
     circ_mv = basic.circ_mv if basic else None
 
@@ -107,9 +109,13 @@ def compute_one_stock(
         scores["score_healthy_turnover"] = ss.score_healthy_turnover(sdf, params)
         scores["score_strong_rally"] = ss.score_strong_rally(sdf, params)
         scores["score_chip_concentration"] = score_chip(sdf, params)
-        scores["score_sector_strength"] = ss.score_sector_strength(
-            float(today_pct) if pd.notna(today_pct) else None, market_pct
-        )
+        # v2 传入行业平均涨幅 → 真·板块强弱;否则回退到个股vs大盘(v1)
+        if params.get("use_industry_strength") and industry_pct is not None:
+            scores["score_sector_strength"] = ss.score_industry_strength(industry_pct, market_pct)
+        else:
+            scores["score_sector_strength"] = ss.score_sector_strength(
+                float(today_pct) if pd.notna(today_pct) else None, market_pct
+            )
         weights = params["weights"]
         wsum = sum(weights.values())
         total = sum(
@@ -154,6 +160,16 @@ def run_selection(
 
     basics = {b.code: b for b in session.scalars(select(StockBasic)).all()}
 
+    # 2b. 自算行业强度：当日各行业平均涨幅(证监会行业,数据自给自足)
+    industry_pct_map: dict[str, float] = {}
+    if params.get("use_industry_strength"):
+        today_df = df[df["trade_date"] == trade_date].copy()
+        today_df["industry"] = today_df["code"].map(
+            lambda c: basics[c].industry if c in basics else None
+        )
+        valid = today_df[today_df["industry"].notna() & (today_df["industry"] != "")]
+        industry_pct_map = valid.groupby("industry")["pct_chg"].mean().to_dict()
+
     # 3. 逐票计算因子
     factor_rows = []
     candidates = []
@@ -161,11 +177,14 @@ def run_selection(
         sdf = sdf.reset_index(drop=True)
         if sdf.iloc[-1]["trade_date"] != trade_date:
             continue  # 当日停牌/无数据
+        b = basics.get(code)
+        ind_pct = industry_pct_map.get(b.industry) if b and b.industry else None
         row = compute_one_stock(
             sdf, params,
-            basic=basics.get(code),
+            basic=b,
             market_pct=market_pct,
             has_negative_event=code in negative_codes,
+            industry_pct=ind_pct,
         )
         factor_rows.append(dict(code=code, trade_date=trade_date, param_version=param_version, **row))
         if row["passed_hard_filter"] and row["in_pullback_window"] and row["total_score"] > 0:

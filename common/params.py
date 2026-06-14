@@ -122,20 +122,37 @@ def load_active_params(session: Session) -> dict:
     return json.loads(row.config_json)
 
 
-def seed_default_params(session: Session) -> None:
-    """将 DEFAULT_PARAMS 写入库作为 active 版本（幂等）。"""
-    version = settings.active_param_version
+def make_v2_params() -> dict:
+    """v2 = v1 + 结合板块:启用真·行业强度因子,并提高板块权重。
+    用于 A/B 对比(v1 不看板块 vs v2 结合板块轮动)。"""
+    import copy
+
+    v2 = copy.deepcopy(DEFAULT_PARAMS)
+    v2["use_industry_strength"] = True       # 启用真板块强弱(个股所属行业跑赢市场)
+    v2["weights"]["sector_strength"] = 1.5   # 板块权重 0.8 → 1.5
+    return v2
+
+
+def load_params_by_version(session: Session, version: str) -> dict:
+    """按版本号读参数;库里没有则回退到代码内置(v1=DEFAULT,v2=make_v2)。"""
     row = session.get(ParamConfig, version)
-    payload = json.dumps(DEFAULT_PARAMS, ensure_ascii=False)
+    if row is not None:
+        return json.loads(row.config_json)
+    return make_v2_params() if version == "v2" else DEFAULT_PARAMS
+
+
+def _upsert_param(session: Session, version: str, payload: dict, desc: str, active: bool) -> None:
+    row = session.get(ParamConfig, version)
+    js = json.dumps(payload, ensure_ascii=False)
     if row is None:
-        session.add(
-            ParamConfig(
-                version=version,
-                description="默认参数 v1，来源于总结.txt 规则翻译",
-                config_json=payload,
-                is_active=True,
-            )
-        )
+        session.add(ParamConfig(version=version, description=desc, config_json=js, is_active=active))
     else:
-        row.config_json = payload
-        row.is_active = True
+        row.config_json = js
+        row.description = desc
+        row.is_active = active
+
+
+def seed_default_params(session: Session) -> None:
+    """写入 v1(DEFAULT) 与 v2(结合板块) 两个版本（幂等）。"""
+    _upsert_param(session, "v1", DEFAULT_PARAMS, "v1 默认(不看板块),总结.txt规则翻译", True)
+    _upsert_param(session, "v2", make_v2_params(), "v2 结合板块强弱(行业跑赢市场加分)", True)
