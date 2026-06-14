@@ -98,10 +98,11 @@ def build_report(
         select(PickSnapshot).where(
             PickSnapshot.trade_date >= period_start,
             PickSnapshot.trade_date <= period_end,
+            PickSnapshot.param_version == param_version,
         )
     ).all()
     if not snaps:
-        log.info("区间 %s ~ %s 无快照", period_start, period_end)
+        log.info("区间 %s ~ %s 版本%s 无快照", period_start, period_end, param_version)
         return None
     snap_by_id = {s.id: s for s in snaps}
     vals = session.scalars(

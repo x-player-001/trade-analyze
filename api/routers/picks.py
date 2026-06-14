@@ -33,15 +33,20 @@ def _to_pick_out(s: PickSnapshot) -> PickOut:
 @router.get("/daily", response_model=DailyPicksOut, summary="某日 Top N 选股")
 def daily_picks(
     trade_date: date | None = Query(None, alias="date", description="默认最新一天"),
+    version: str = Query("v1", description="参数版本 v1(不看板块)/v2(结合板块)"),
     session: Session = Depends(get_session),
 ) -> DailyPicksOut:
     if trade_date is None:
-        trade_date = session.scalar(select(func.max(PickSnapshot.trade_date)))
+        trade_date = session.scalar(
+            select(func.max(PickSnapshot.trade_date))
+            .where(PickSnapshot.param_version == version)
+        )
         if trade_date is None:
             raise HTTPException(404, "暂无选股数据")
     snaps = session.scalars(
         select(PickSnapshot)
-        .where(PickSnapshot.trade_date == trade_date)
+        .where(PickSnapshot.trade_date == trade_date,
+               PickSnapshot.param_version == version)
         .order_by(PickSnapshot.board_group, PickSnapshot.rank)
     ).all()
     ms = session.get(MarketStatus, trade_date)
