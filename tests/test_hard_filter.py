@@ -19,8 +19,9 @@ def _flat_closes(n: int, price: float = 10.0) -> list[float]:
 
 
 def test_healthy_stock_passes():
-    """平稳横盘、量能正常、换手15% → 通过。"""
-    closes = _flat_closes(80)
+    """缩量横盘但近期有过大涨(有活力)、量能正常 → 通过。"""
+    # 横盘 + 一根试盘大涨(+6%),既有活力又是回踩形态
+    closes = _flat_closes(70) + [10.6] + _flat_closes(9, 10.5)
     df = _df(make_quotes("600001", date(2026, 1, 5), closes))
     ok, reasons = hard_filter_stock(df, DEFAULT_PARAMS, circ_mv=50.0)
     assert ok, reasons
@@ -106,18 +107,19 @@ def test_mv_upper_relaxed():
 
 
 def test_inactive_rejected():
-    """死水排除:近20日换手率全部很低(银行股式)→ inactive。"""
-    closes = _flat_closes(80)
-    df = _df(make_quotes("600001", date(2026, 1, 5), closes, turnover=[1.0] * 80))
+    """死水排除:近30日无大涨(银行股式,全程微涨微跌)→ inactive。"""
+    # 微幅波动,最大单日涨幅<5%
+    closes = [10.0 + (0.1 if i % 2 else -0.1) for i in range(80)]
+    df = _df(make_quotes("600001", date(2026, 1, 5), closes))
     ok, reasons = hard_filter_stock(df, DEFAULT_PARAMS, circ_mv=50.0)
     assert not ok and "inactive" in reasons
 
 
 def test_active_not_rejected():
-    """有活性的票(近期有过≥2%换手)不因 inactive 被拒。"""
-    closes = _flat_closes(80)
-    turn = [1.0] * 75 + [3.0, 1.0, 1.0, 1.0, 1.0]  # 近期有3%换手日
-    df = _df(make_quotes("600001", date(2026, 1, 5), closes, turnover=turn))
+    """有活力的票(近30日有过≥5%大涨)不因 inactive 被拒。"""
+    # 横盘 + 近期一根+8%大涨日
+    closes = _flat_closes(75) + [10.8, 10.7, 10.6, 10.5, 10.4]
+    df = _df(make_quotes("600001", date(2026, 1, 5), closes))
     ok, reasons = hard_filter_stock(df, DEFAULT_PARAMS, circ_mv=50.0)
     assert "inactive" not in reasons
 

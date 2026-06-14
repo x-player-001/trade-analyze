@@ -78,11 +78,12 @@ def hard_filter_stock(
     if recent_turn.notna().any() and (recent_turn > h["death_turnover_pct"]).any():
         reasons.append("death_turnover")
 
-    # 死水排除：近N日最大换手率过低 = 无活性(大盘蓝筹/银行股天然低波动,
-    # 非主力潜伏)。他买的票近期最大换手都≥2%,银行股多在2%以下。
+    # 死水排除：近N日无大涨 = 无"活力"(银行股式死水,无主力拉升)。
+    # 他强调"拉升强劲有力";标注校准:他买的票近30日最大单日涨幅都≥5.6%,
+    # 银行股≤3.3%,两组无重叠。比换手率指标更干净(江阴2.8%换手反高于华大2.2%)。
     act_win = h["activity_window"]
-    max_turn = df["turnover"].tail(act_win).max()
-    if pd.notna(max_turn) and max_turn < h["min_activity_turnover"]:
+    max_gain = df["pct_chg"].tail(act_win).max()
+    if pd.notna(max_gain) and max_gain < h["min_activity_gain"]:
         reasons.append("inactive")
 
     # 近期涨幅过大
