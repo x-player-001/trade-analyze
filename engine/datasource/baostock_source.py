@@ -67,6 +67,22 @@ class BaostockSource(DataSource):
             self._ak.ak = ak
         return self._ak.fetch_stock_basic()
 
+    def fetch_industry(self) -> pd.DataFrame:
+        """全市场行业分类(证监会行业)。返回列: code, industry。
+        baostock query_stock_industry 一次给全市场,稳定可连。"""
+        rs = self.bs.query_stock_industry()
+        rows = []
+        while rs.error_code == "0" and rs.next():
+            rows.append(rs.get_row_data())
+        if not rows:
+            return pd.DataFrame(columns=["code", "industry"])
+        df = pd.DataFrame(rows, columns=rs.fields)
+        # bs code: sh.600000 → 600000
+        df["code"] = df["code"].str.split(".").str[-1]
+        df = df[["code", "industry"]].rename(columns={})
+        # 去掉行业前的分类代码前缀(如 "J66货币金融服务" → 取中文部分保留原值)
+        return df[df["industry"].astype(bool)]
+
     # ---------------- 行情 ----------------
     def _query_kline(self, bs_code: str, start: date, end: date, adjustflag: str) -> pd.DataFrame:
         fields = "date,open,high,low,close,volume,amount,turn,pctChg"

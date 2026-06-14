@@ -50,6 +50,22 @@ def sync_stock_basic(ds: DataSource) -> int:
     return n
 
 
+def sync_industry(ds) -> int:
+    """给 stock_basic 补行业字段(baostock 行业分类)。只更新 industry 列。"""
+    if not hasattr(ds, "fetch_industry"):
+        log.warning("数据源不支持 fetch_industry,跳过")
+        return 0
+    df = ds.fetch_industry()
+    if df.empty:
+        log.warning("行业分类为空,跳过")
+        return 0
+    rows = _to_clean_records(df)
+    with session_scope() as s:
+        n = bulk_upsert(s, StockBasic, rows, update_cols=["industry"])
+    log.info("行业分类落库 %d 行", n)
+    return n
+
+
 def _last_quote_date(code: str) -> date | None:
     with session_scope() as s:
         return s.scalar(
