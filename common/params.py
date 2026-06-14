@@ -100,7 +100,7 @@ DEFAULT_PARAMS: dict = {
         "chip_profit_threshold": 30.0,
     },
     # ---------------- 选股输出 ----------------
-    "selection": {"top_n": 10},
+    "selection": {"top_n": 20},
     # ---------------- 验证 ----------------
     "validation": {
         "hit_threshold_pct": 7.0,        # 命中定义：3日内单日涨幅≥7%
