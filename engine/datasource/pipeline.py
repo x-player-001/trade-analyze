@@ -61,8 +61,16 @@ def sync_industry(ds) -> int:
         return 0
     rows = _to_clean_records(df)
     with session_scope() as s:
-        n = bulk_upsert(s, StockBasic, rows, update_cols=["industry"])
-    log.info("行业分类落库 %d 行", n)
+        # 只更新已存在的股票(行业数据的code集与stock_basic有差集,新code无name会INSERT失败)
+        existing = set(s.scalars(select(StockBasic.code)))
+        rows = [r for r in rows if r["code"] in existing]
+        n = 0
+        for r in rows:
+            obj = s.get(StockBasic, r["code"])
+            if obj:
+                obj.industry = r["industry"]
+                n += 1
+    log.info("行业分类更新 %d 行", n)
     return n
 
 
