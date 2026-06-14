@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 from api.main import app
 from common.db import get_session
 from common.models import (
+    DailyQuote,
     MarketStatus,
     ParamConfig,
     PickSnapshot,
@@ -21,6 +22,8 @@ from common.models import (
     StockFactor,
     ValidationReport,
 )
+from common.upsert import bulk_upsert
+from tests.conftest import make_quotes
 
 D = date(2026, 6, 10)
 
@@ -142,3 +145,82 @@ def test_openapi_doc(client):
     paths = r.json()["paths"]
     assert "/api/picks/daily" in paths
     assert "/api/validation/summary" in paths
+    assert "/api/quotes/{code}/kline" in paths
+
+
+# ---------------- K线接口 ----------------
+def _seed_kline(session):
+    """600001 连续10根日线 + 一个选股标记(落在区间内)。"""
+    session.add(StockBasic(code="600001", name="测试股", board="main",
+                           price_limit_pct=10.0, is_st=False, is_active=True))
+    closes = [10.0, 10.2, 10.1, 10.3, 10.5, 10.4, 10.6, 10.8, 10.7, 10.9]
+    rows = make_quotes("600001", date(2026, 6, 1), closes)
+    # 给最后一根设置原始收盘=后复权的一半(模拟复权差异)
+    rows[-1]["raw_close"] = rows[-1]["close"] / 2
+    bulk_upsert(session, DailyQuote, rows)
+    mark_date = rows[5]["trade_date"]
+    session.add(PickSnapshot(
+        trade_date=mark_date, code="600001", name="测试股", rank=2,
+        total_score=0.6, factor_scores_json="{}", reasons="回踩5日线",
+        decision_close=10.4, decision_raw_close=10.4, limit_up=False,
+        tradable=True, param_version="v1",
+    ))
+    session.commit()
+    return rows
+
+
+def test_kline_basic(client, session):
+    rows = _seed_kline(session)
+    r = client.get("/api/quotes/600001/kline")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["code"] == "600001"
+    assert body["name"] == "测试股"
+    assert body["adjust"] == "hfq"
+    assert len(body["bars"]) == len(rows)
+    # 时间正序
+    dates = [b["trade_date"] for b in body["bars"]]
+    assert dates == sorted(dates)
+    # 默认后复权:close 是后复权值
+    assert body["bars"][-1]["close"] == 10.9
+    # 选股标记被带出
+    assert len(body["marks"]) == 1
+    assert body["marks"][0]["rank"] == 2
+    assert "回踩" in body["marks"][0]["reasons"]
+
+
+def test_kline_limit(client, session):
+    _seed_kline(session)
+    r = client.get("/api/quotes/600001/kline", params={"limit": 3})
+    assert r.status_code == 200
+    bars = r.json()["bars"]
+    assert len(bars) == 3
+    # 取最近3根且正序
+    assert bars[-1]["close"] == 10.9
+
+
+def test_kline_date_range(client, session):
+    rows = _seed_kline(session)
+    start = rows[2]["trade_date"]
+    end = rows[5]["trade_date"]
+    r = client.get("/api/quotes/600001/kline",
+                   params={"start": str(start), "end": str(end)})
+    assert r.status_code == 200
+    bars = r.json()["bars"]
+    assert len(bars) == 4
+    assert bars[0]["trade_date"] == str(start)
+    assert bars[-1]["trade_date"] == str(end)
+
+
+def test_kline_adjust_none(client, session):
+    _seed_kline(session)
+    r = client.get("/api/quotes/600001/kline", params={"adjust": "none"})
+    assert r.status_code == 200
+    bars = r.json()["bars"]
+    # 最后一根 raw_close=后复权的一半,原始价模式 close 应取原始值
+    assert bars[-1]["close"] == round(10.9 / 2, 3)
+
+
+def test_kline_404(client, session):
+    r = client.get("/api/quotes/999999/kline")
+    assert r.status_code == 404

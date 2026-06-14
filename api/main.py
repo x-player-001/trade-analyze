@@ -9,7 +9,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
-from api.routers import market, picks, validation
+from api.routers import market, picks, quotes, validation
 from common.config import settings
 from common.db import engine
 
@@ -30,6 +30,7 @@ app.add_middleware(
 app.include_router(picks.router)
 app.include_router(validation.router)
 app.include_router(market.router)
+app.include_router(quotes.router)
 
 
 @app.get("/health", tags=["meta"], summary="健康检查")

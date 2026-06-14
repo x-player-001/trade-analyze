@@ -110,3 +110,34 @@ class ParamVersionOut(ORMModel):
     description: Optional[str] = None
     is_active: bool
     created_at: datetime
+
+
+# ---------------- K线 ----------------
+class KlineBar(ORMModel):
+    """单根K线。OHLC 默认后复权(与选股因子一致),raw_close 为原始收盘。"""
+    trade_date: date
+    open: float
+    high: float
+    low: float
+    close: float
+    raw_close: Optional[float] = None
+    volume: Optional[float] = None
+    amount: Optional[float] = None
+    pct_chg: Optional[float] = None
+    turnover: Optional[float] = None
+
+
+class KlineMark(BaseModel):
+    """K线上的选股标记:某日该股被选中,用于在图上标注买点。"""
+    trade_date: date
+    rank: int
+    total_score: float
+    reasons: Optional[str] = None
+
+
+class KlineOut(BaseModel):
+    code: str
+    name: Optional[str] = None
+    adjust: str               # hfq=后复权 / none=不复权
+    bars: List[KlineBar]
+    marks: List[KlineMark]    # 区间内该股被选中的日期(画买点标记用)
