@@ -75,17 +75,20 @@ def _sync_one_daily(ds: DataSource, code: str, end: date, full: bool) -> int:
         return bulk_upsert(s, DailyQuote, rows)
 
 
-def sync_daily(ds: DataSource, codes: list[str], end: date | None = None, full: bool = False) -> int:
-    """并发增量同步日线。codes 为空则同步全市场（从 stock_basic 取）。"""
+def sync_daily(ds: DataSource, codes: list[str], end: date | None = None,
+               full: bool = False, max_workers: int | None = None) -> int:
+    """并发增量同步日线。codes 为空则同步全市场（从 stock_basic 取）。
+    max_workers 为 None 时用配置值；baostock 等非线程安全源应传 1。"""
     end = end or date.today()
     if not codes:
         with session_scope() as s:
             codes = list(s.scalars(select(StockBasic.code).where(StockBasic.is_active.is_(True))))
-    log.info("同步日线: %d 只, 截止 %s, full=%s", len(codes), end, full)
+    workers = max_workers if max_workers is not None else settings.fetch_max_workers
+    log.info("同步日线: %d 只, 截止 %s, full=%s, 并发=%d", len(codes), end, full, workers)
 
     total = 0
     done = 0
-    with ThreadPoolExecutor(max_workers=settings.fetch_max_workers) as ex:
+    with ThreadPoolExecutor(max_workers=workers) as ex:
         futures = {ex.submit(_sync_one_daily, ds, c, end, full): c for c in codes}
         for fut in as_completed(futures):
             code = futures[fut]

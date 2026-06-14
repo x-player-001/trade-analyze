@@ -5,7 +5,8 @@ description = "A股自动选股分析系统 - 候选池生成与验证闭环"
 requires-python = ">=3.9"
 dependencies = [
     # 数据采集
-    "akshare>=1.16.0",
+    "baostock>=0.8.8",            # 日线主数据源(原始+复权价,境外可连,不限流)
+    "akshare>=1.16.0",           # 事件/龙虎榜等辅助数据
     # 计算
     "pandas>=2.2.0",
     "numpy>=1.26.0",
