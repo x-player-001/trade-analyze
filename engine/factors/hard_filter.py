@@ -29,6 +29,7 @@ REJECT_LABELS = {
     "deviation": "偏离5日线过大",
     "chaotic": "走势杂乱控盘差",
     "illiquid": "成交额不足",
+    "inactive": "无活性(死水)",
     "mv_range": "市值超范围",
     "new_stock": "新股/数据不足",
     "negative_event": "重大利空事件",
@@ -76,6 +77,13 @@ def hard_filter_stock(
     recent_turn = df["turnover"].tail(h["death_turnover_lookback"])
     if recent_turn.notna().any() and (recent_turn > h["death_turnover_pct"]).any():
         reasons.append("death_turnover")
+
+    # 死水排除：近N日最大换手率过低 = 无活性(大盘蓝筹/银行股天然低波动,
+    # 非主力潜伏)。他买的票近期最大换手都≥2%,银行股多在2%以下。
+    act_win = h["activity_window"]
+    max_turn = df["turnover"].tail(act_win).max()
+    if pd.notna(max_turn) and max_turn < h["min_activity_turnover"]:
+        reasons.append("inactive")
 
     # 近期涨幅过大
     w = h["cum_return_window"]

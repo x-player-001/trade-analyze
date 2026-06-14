@@ -97,11 +97,29 @@ def test_illiquid_rejected():
     assert not ok and "illiquid" in reasons
 
 
-def test_mv_range_rejected():
+def test_mv_upper_relaxed():
+    """市值上限已放开(max_circ_mv=0),大盘股不再因市值被拒(他买千亿大盘股)。"""
     closes = _flat_closes(80)
     df = _df(make_quotes("600001", date(2026, 1, 5), closes))
-    ok, reasons = hard_filter_stock(df, DEFAULT_PARAMS, circ_mv=500.0)  # 500亿
-    assert not ok and "mv_range" in reasons
+    ok, reasons = hard_filter_stock(df, DEFAULT_PARAMS, circ_mv=2000.0)  # 2000亿
+    assert "mv_range" not in reasons
+
+
+def test_inactive_rejected():
+    """死水排除:近20日换手率全部很低(银行股式)→ inactive。"""
+    closes = _flat_closes(80)
+    df = _df(make_quotes("600001", date(2026, 1, 5), closes, turnover=[1.0] * 80))
+    ok, reasons = hard_filter_stock(df, DEFAULT_PARAMS, circ_mv=50.0)
+    assert not ok and "inactive" in reasons
+
+
+def test_active_not_rejected():
+    """有活性的票(近期有过≥2%换手)不因 inactive 被拒。"""
+    closes = _flat_closes(80)
+    turn = [1.0] * 75 + [3.0, 1.0, 1.0, 1.0, 1.0]  # 近期有3%换手日
+    df = _df(make_quotes("600001", date(2026, 1, 5), closes, turnover=turn))
+    ok, reasons = hard_filter_stock(df, DEFAULT_PARAMS, circ_mv=50.0)
+    assert "inactive" not in reasons
 
 
 def test_negative_event_rejected():
