@@ -49,16 +49,21 @@ def main() -> None:
     p.add_argument("--shard", type=str, default=None, help="分片 i/m,如 0/4")
     p.add_argument("--source", type=str, default="baostock",
                    choices=["baostock", "akshare", "tushare"], help="日线数据源,默认baostock")
+    p.add_argument("--with-index", action="store_true",
+                   help="tushare 源是否一并拉指数(默认否,index_daily 限频严)")
     args = p.parse_args()
 
     end = datetime.strptime(args.end, "%Y-%m-%d").date() if args.end else None
 
     # tushare：按交易日一次拉全市场(不逐票)。--end 指定交易日，默认今天。
+    # 指数默认不拉(tushare index_daily 免费账户限频 1次/分钟,且指数数据量小、
+    # 已有 baostock 历史)；需要时加 --with-index 单独拉。
     if args.source == "tushare":
         from datetime import date
         from engine.datasource.pipeline import sync_daily_all
         ds, _ = _make_source("tushare")
-        sync_index(ds, end=end, full=args.full)
+        if args.with_index:
+            sync_index(ds, end=end, full=args.full)
         sync_daily_all(ds, [end or date.today()])
         return
 
