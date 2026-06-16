@@ -41,7 +41,10 @@ def _future_quotes(session: Session, code: str, after: date, n: int) -> pd.DataF
 def validate_snapshot(session: Session, snap: PickSnapshot, cost_pct: float) -> dict:
     """对单条快照计算验证指标。返回 pick_validation 行 dict。"""
     fut = _future_quotes(session, snap.code, snap.trade_date, 3)
-    base = snap.decision_close
+    # 基准用原始(未复权)价：未来价格 _future_quotes 取的是 raw_*,须同口径。
+    # 历史快照的 decision_close 可能是改造前的后复权价(与 raw 差几十倍,会算出
+    # -90% 假跌幅),故优先用 decision_raw_close。
+    base = snap.decision_raw_close if snap.decision_raw_close is not None else snap.decision_close
     cost = cost_pct / 100.0
 
     def _ret(price: float | None) -> float | None:
