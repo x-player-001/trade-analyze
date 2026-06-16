@@ -20,11 +20,11 @@ from common.params import (
 from engine.datasource.akshare_source import AkshareSource
 from engine.datasource.baostock_source import BaostockSource
 from engine.datasource.pipeline import (
-    sync_daily,
+    sync_daily_all,
     sync_index,
-    sync_industry,
     sync_stock_basic,
 )
+from engine.datasource.tushare_source import TushareSource
 from engine.selection.selector import run_selection
 from engine.validation.validator import backfill_validations
 
@@ -37,16 +37,23 @@ def main() -> None:
     today = date.today()
     log.info("===== 每日管线启动 %s =====", today)
 
-    # 1. 数据更新：基础信息用 akshare(含市值),日线/指数/行业用 baostock
+    # 1. 数据更新：
+    #    - 基础信息用 akshare(含市值)
+    #    - 日线用 tushare：一次拉全市场当日(秒级,境外可连,不逐票)。只填原始价 raw_*,
+    #      复权列留空;因子/验证均已切原始价计算。
+    #    - 指数仍用 baostock(tushare index_daily 限频;指数数据量小)
+    #    - 行业分类暂不在每日管线更新(sync_industry 逐票更新5000+会卡;
+    #      v2 板块因子用已有行业数据,行业变动不频繁,可另行手动刷新)
     try:
         sync_stock_basic(AkshareSource())
     except Exception:
         log.exception("基础信息更新失败")
     try:
-        bs = BaostockSource()
-        sync_index(bs)
-        sync_industry(bs)                   # 行业分类(板块因子用)
-        sync_daily(bs, [], max_workers=1)   # baostock 单线程增量
+        sync_index(BaostockSource())
+    except Exception:
+        log.exception("指数更新失败,继续(用已有指数数据)")
+    try:
+        sync_daily_all(TushareSource(), [today])
     except Exception:
         log.exception("日线更新失败,继续后续步骤(用已有数据)")
 
