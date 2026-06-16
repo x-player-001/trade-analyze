@@ -128,6 +128,29 @@ def sync_daily(ds: DataSource, codes: list[str], end: date | None = None,
     return total
 
 
+def sync_daily_all(ds, trade_dates: list[date]) -> int:
+    """按交易日全市场落库(tushare 等支持 fetch_daily_all 的源)。
+
+    每个交易日一次请求拉全市场，避免逐票轮询。复权字段(open/high/low/close)
+    不在返回中、留空入库。trade_dates 为要拉取的交易日列表(通常就是今天/缺的几天)。
+    """
+    if not hasattr(ds, "fetch_daily_all"):
+        raise RuntimeError("该数据源不支持 fetch_daily_all，请用 sync_daily 逐票模式")
+    total = 0
+    for td in trade_dates:
+        df = ds.fetch_daily_all(td)
+        if df.empty:
+            log.info("%s 无数据(非交易日?)，跳过", td)
+            continue
+        rows = _to_clean_records(df)
+        with session_scope() as s:
+            n = bulk_upsert(s, DailyQuote, rows)
+        total += n
+        log.info("%s 全市场落库 %d 行", td, n)
+    log.info("按日全市场同步完成: 共 %d 行", total)
+    return total
+
+
 def sync_index(ds: DataSource, end: date | None = None, full: bool = False) -> int:
     end = end or date.today()
     start = datetime.strptime(settings.history_start_date, "%Y-%m-%d").date()

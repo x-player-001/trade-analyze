@@ -90,11 +90,11 @@ class DailyQuote(Base):
     id: Mapped[int] = mapped_column(BigIntPK, primary_key=True, autoincrement=True)
     code: Mapped[str] = mapped_column(String(10), nullable=False, index=True)
     trade_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
-    # 后复权 OHLC（选股因子用，形态准）
-    open: Mapped[float] = mapped_column(Price, nullable=False)
-    high: Mapped[float] = mapped_column(Price, nullable=False)
-    low: Mapped[float] = mapped_column(Price, nullable=False)
-    close: Mapped[float] = mapped_column(Price, nullable=False)
+    # 后复权 OHLC（选股因子用，形态准）。tushare 源只填原始价、复权字段留空，故可空。
+    open: Mapped[Optional[float]] = mapped_column(Price)
+    high: Mapped[Optional[float]] = mapped_column(Price)
+    low: Mapped[Optional[float]] = mapped_column(Price)
+    close: Mapped[Optional[float]] = mapped_column(Price)
     # 原始未复权 OHLC（真实成交价，展示/图片识别用，与 akshare 源零误差）
     raw_open: Mapped[Optional[float]] = mapped_column(Price, comment="原始开盘")
     raw_high: Mapped[Optional[float]] = mapped_column(Price, comment="原始最高")

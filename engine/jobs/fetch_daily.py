@@ -23,6 +23,9 @@ def _make_source(name: str):
     if name == "baostock":
         from engine.datasource.baostock_source import BaostockSource
         return BaostockSource(), 1   # baostock 会话非线程安全，强制单线程
+    if name == "tushare":
+        from engine.datasource.tushare_source import TushareSource
+        return TushareSource(), None
     from engine.datasource.akshare_source import AkshareSource
     return AkshareSource(), None     # akshare 用配置的并发
 
@@ -45,10 +48,20 @@ def main() -> None:
     p.add_argument("--codes", type=str, default=None, help="逗号分隔代码,默认全市场")
     p.add_argument("--shard", type=str, default=None, help="分片 i/m,如 0/4")
     p.add_argument("--source", type=str, default="baostock",
-                   choices=["baostock", "akshare"], help="日线数据源,默认baostock")
+                   choices=["baostock", "akshare", "tushare"], help="日线数据源,默认baostock")
     args = p.parse_args()
 
     end = datetime.strptime(args.end, "%Y-%m-%d").date() if args.end else None
+
+    # tushare：按交易日一次拉全市场(不逐票)。--end 指定交易日，默认今天。
+    if args.source == "tushare":
+        from datetime import date
+        from engine.datasource.pipeline import sync_daily_all
+        ds, _ = _make_source("tushare")
+        sync_index(ds, end=end, full=args.full)
+        sync_daily_all(ds, [end or date.today()])
+        return
+
     if args.codes:
         codes = [c.strip() for c in args.codes.split(",")]
     elif args.shard:
