@@ -58,18 +58,23 @@ def _load_quotes_window(session: Session, trade_date: date) -> pd.DataFrame:
     if not dates:
         return pd.DataFrame()
     start = min(dates)
+    # 因子用原始(未复权)价计算：raw_* 列全程齐全，而复权列(open/high/low/close)
+    # 在 tushare 增量数据上留空。这里取 raw_* 并映射成因子约定的 open/high/low/close
+    # 列名，因子代码无需感知。raw_close 单列额外保留供 decision_raw_close 落快照用。
     rows = session.execute(
         select(
-            DailyQuote.code, DailyQuote.trade_date, DailyQuote.open, DailyQuote.high,
-            DailyQuote.low, DailyQuote.close, DailyQuote.raw_close, DailyQuote.volume,
+            DailyQuote.code, DailyQuote.trade_date,
+            DailyQuote.raw_open, DailyQuote.raw_high, DailyQuote.raw_low,
+            DailyQuote.raw_close, DailyQuote.volume,
             DailyQuote.amount, DailyQuote.pct_chg, DailyQuote.turnover,
         ).where(DailyQuote.trade_date >= start, DailyQuote.trade_date <= trade_date)
     ).all()
     df = pd.DataFrame(
         rows,
-        columns=["code", "trade_date", "open", "high", "low", "close", "raw_close",
+        columns=["code", "trade_date", "open", "high", "low", "close",
                  "volume", "amount", "pct_chg", "turnover"],
     )
+    df["raw_close"] = df["close"]  # 原始收盘别名，落快照 decision_raw_close 用
     # DECIMAL 列从库里取出是 Decimal，转 float 供 pandas/numpy 数值运算
     num_cols = ["open", "high", "low", "close", "raw_close",
                 "volume", "amount", "pct_chg", "turnover"]

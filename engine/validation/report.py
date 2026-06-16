@@ -31,8 +31,9 @@ log = get_logger("validation.report")
 
 def _market_avg_t3_ret(session: Session, trade_date: date) -> float | None:
     """某选股日全市场 T+3 平均收盘收益（市场 beta 基准）。"""
+    # 原始价：与选股/验证同口径，且 raw_* 全程齐全(复权列在 tushare 数据上留空)
     base = session.execute(
-        select(DailyQuote.code, DailyQuote.close)
+        select(DailyQuote.code, DailyQuote.raw_close)
         .where(DailyQuote.trade_date == trade_date)
     ).all()
     if not base:
@@ -48,7 +49,7 @@ def _market_avg_t3_ret(session: Session, trade_date: date) -> float | None:
         return None
     t3 = future_dates[-1]
     fut = session.execute(
-        select(DailyQuote.code, DailyQuote.close).where(DailyQuote.trade_date == t3)
+        select(DailyQuote.code, DailyQuote.raw_close).where(DailyQuote.trade_date == t3)
     ).all()
     fut_df = pd.DataFrame(fut, columns=["code", "t3_close"])
     fut_df["t3_close"] = fut_df["t3_close"].astype(float)

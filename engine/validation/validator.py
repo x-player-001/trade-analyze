@@ -23,9 +23,11 @@ log = get_logger("validation")
 
 
 def _future_quotes(session: Session, code: str, after: date, n: int) -> pd.DataFrame:
+    # 用原始(未复权)价：decision_close 落的是原始价(选股已切 raw_*),
+    # future 收益率须同口径，否则复权/不复权混算。raw_* 全程齐全。
     rows = session.execute(
-        select(DailyQuote.trade_date, DailyQuote.high, DailyQuote.low,
-               DailyQuote.close, DailyQuote.pct_chg)
+        select(DailyQuote.trade_date, DailyQuote.raw_high, DailyQuote.raw_low,
+               DailyQuote.raw_close, DailyQuote.pct_chg)
         .where(DailyQuote.code == code, DailyQuote.trade_date > after)
         .order_by(DailyQuote.trade_date)
         .limit(n)
