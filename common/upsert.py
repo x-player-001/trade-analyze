@@ -39,10 +39,14 @@ def bulk_upsert(
     dialect = session.bind.dialect.name
     conflict_cols = _index_elements(model)
     all_cols = [c.name for c in model.__table__.columns]
+    # 只在 rows 实际提供的列上做 INSERT/UPDATE：行内未给的列(如 tushare 不填复权价)
+    # 不会出现在 VALUES 中，故 ON DUPLICATE KEY UPDATE 也不能引用它们，
+    # 否则 MySQL 报 "Unknown column 'new.<col>'"。
+    provided = {k for r in rows for k in r.keys()}
     if update_cols is None:
-        # 默认更新除主键/冲突键/created_at 外的全部列
+        # 默认更新除主键/冲突键/created_at 外、且 rows 实际提供的列
         skip = set(conflict_cols) | {"id", "created_at"}
-        update_cols = [c for c in all_cols if c not in skip]
+        update_cols = [c for c in all_cols if c not in skip and c in provided]
 
     total = 0
     for i in range(0, len(rows), chunk_size):
