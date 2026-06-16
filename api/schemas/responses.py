@@ -82,6 +82,12 @@ class ValidationOut(ORMModel):
     snapshot_id: int
     trade_date: date
     code: str
+    # 以下来自关联的 pick_snapshot(同一 snapshot_id),便于前端直接展示而不必再查选股接口
+    name: Optional[str] = None
+    board_group: Optional[str] = None    # main=主板 / other=非主板
+    rank: Optional[int] = None
+    total_score: Optional[float] = None
+    param_version: Optional[str] = None  # v1/v2,区分两套(daily 不带version时两套混排)
     t1_high_ret: Optional[float] = None
     t2_high_ret: Optional[float] = None
     t3_high_ret: Optional[float] = None

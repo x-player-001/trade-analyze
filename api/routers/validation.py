@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from api.schemas.responses import ReportOut, ValidationOut
 from common.db import get_session
-from common.models import PickValidation, ValidationReport
+from common.models import PickSnapshot, PickValidation, ValidationReport
 
 router = APIRouter(prefix="/api/validation", tags=["validation"])
 
@@ -32,9 +32,25 @@ def validation_summary(
 @router.get("/daily", response_model=list[ValidationOut], summary="某选股日的验证回填结果")
 def daily_validation(
     trade_date: date = Query(..., alias="date"),
+    version: str | None = Query(None, description="按参数版本过滤 v1/v2,空=两套合并(同票出现两次)"),
     session: Session = Depends(get_session),
 ) -> list[ValidationOut]:
-    rows = session.scalars(
-        select(PickValidation).where(PickValidation.trade_date == trade_date)
-    ).all()
-    return [ValidationOut.model_validate(r) for r in rows]
+    # join pick_snapshot 带出名称/排名/评分/主板/版本(验证表本身只有收益类字段)
+    q = (
+        select(PickValidation, PickSnapshot)
+        .join(PickSnapshot, PickValidation.snapshot_id == PickSnapshot.id)
+        .where(PickValidation.trade_date == trade_date)
+    )
+    if version:
+        q = q.where(PickSnapshot.param_version == version)
+    q = q.order_by(PickSnapshot.param_version, PickSnapshot.board_group, PickSnapshot.rank)
+    out = []
+    for val, snap in session.execute(q).all():
+        item = ValidationOut.model_validate(val)
+        item.name = snap.name
+        item.board_group = snap.board_group
+        item.rank = snap.rank
+        item.total_score = snap.total_score
+        item.param_version = snap.param_version
+        out.append(item)
+    return out

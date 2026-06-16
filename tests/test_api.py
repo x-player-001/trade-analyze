@@ -171,6 +171,19 @@ def test_validation_daily(client, seed_api_data):
     rows = r.json()
     assert len(rows) == 1
     assert rows[0]["hit_7pct"] is True
+    # join pick_snapshot 带出的字段
+    assert rows[0]["name"] == "测试股"
+    assert rows[0]["rank"] == 1
+    assert rows[0]["total_score"] == 0.82
+    assert rows[0]["param_version"] == "v1"
+
+
+def test_validation_daily_version_filter(client, seed_api_data):
+    # 指定版本过滤(seed 只有 v1)
+    assert len(client.get("/api/validation/daily",
+                          params={"date": str(D), "version": "v1"}).json()) == 1
+    assert len(client.get("/api/validation/daily",
+                          params={"date": str(D), "version": "v2"}).json()) == 0
 
 
 def test_validation_summary(client, seed_api_data):
