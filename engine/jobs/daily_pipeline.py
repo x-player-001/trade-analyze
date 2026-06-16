@@ -17,13 +17,7 @@ from common.params import (
     load_params_by_version,
     seed_default_params,
 )
-from engine.datasource.akshare_source import AkshareSource
-from engine.datasource.baostock_source import BaostockSource
-from engine.datasource.pipeline import (
-    sync_daily_all,
-    sync_index,
-    sync_stock_basic,
-)
+from engine.datasource.pipeline import sync_daily_all
 from engine.datasource.tushare_source import TushareSource
 from engine.selection.selector import run_selection
 from engine.validation.validator import backfill_validations
@@ -37,21 +31,15 @@ def main() -> None:
     today = date.today()
     log.info("===== 每日管线启动 %s =====", today)
 
-    # 1. 数据更新：
-    #    - 基础信息用 akshare(含市值)
-    #    - 日线用 tushare：一次拉全市场当日(秒级,境外可连,不逐票)。只填原始价 raw_*,
-    #      复权列留空;因子/验证均已切原始价计算。
-    #    - 指数仍用 baostock(tushare index_daily 限频;指数数据量小)
-    #    - 行业分类暂不在每日管线更新(sync_industry 逐票更新5000+会卡;
-    #      v2 板块因子用已有行业数据,行业变动不频繁,可另行手动刷新)
-    try:
-        sync_stock_basic(AkshareSource())
-    except Exception:
-        log.exception("基础信息更新失败")
-    try:
-        sync_index(BaostockSource())
-    except Exception:
-        log.exception("指数更新失败,继续(用已有指数数据)")
+    # 1. 数据更新：只拉日线(tushare 一次全市场当日,秒级,境外可连,不逐票)。
+    #    只填原始价 raw_*,复权列留空;因子/验证均已切原始价计算。
+    #
+    #    刻意不在每日管线做的事(避免拖慢/卡死):
+    #    - 基础信息(akshare): 境外封IP会重试2.5分钟才失败;且名称/板块/市值变化极慢,
+    #      改为单独低频手动跑 `python -m engine.jobs.fetch_basic`。
+    #    - 指数(baostock/tushare): 大盘开关当前停用(market_switch_enabled=False),
+    #      缺指数不影响选股出票,故每日不拉。启用开关前需恢复指数更新。
+    #    - 行业分类: sync_industry 逐票更新5000+会卡;行业变动不频繁,另行手动刷新。
     try:
         sync_daily_all(TushareSource(), [today])
     except Exception:
