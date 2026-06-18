@@ -171,67 +171,15 @@ def _is_limit_up(row: pd.Series, limit_pct: float) -> bool:
     return pd.notna(pct) and pct >= limit_pct - 0.3
 
 
-def run_selection(
+def _persist_snapshot(
     session: Session,
     trade_date: date,
-    params: dict,
     param_version: str,
-    negative_codes: set[str] | None = None,
+    params: dict,
+    candidates: list,
+    basics: dict,
 ) -> list[dict]:
-    """执行某交易日选股全流程，返回写入的快照行（已存在则返回空）。"""
-    negative_codes = negative_codes or set()
-
-    # 1. 大盘开关
-    ms = compute_market_status(session, trade_date, params)
-    log.info("%s 大盘开关: %s (%s)", trade_date, "开" if ms.is_open else "关", ms.reason or "正常")
-
-    # 2. 行情窗口起始日 + 全市场代码列表(只取代码,不加载行情,内存小)
-    start = _window_start(session, trade_date)
-    if start is None:
-        log.warning("%s 无行情数据", trade_date)
-        return []
-    market_pct = ms.sh_pct_chg
-    all_codes = list(session.scalars(select(DailyQuote.code).distinct()))
-
-    basics = {b.code: b for b in session.scalars(select(StockBasic)).all()}
-
-    # 2b. 自算行业强度：当日各行业平均涨幅(只查当日一天,内存极小)
-    industry_pct_map: dict[str, float] = {}
-    if params.get("use_industry_strength"):
-        industry_pct_map = _today_industry_pct(session, trade_date, basics)
-
-    # 3. 分批加载行情、逐票计算因子。每批算完即释放,峰值≈单批而非全市场。
-    #    分批不影响结果:每票因子只看自己的窗口,票与票之间独立。
-    factor_rows = []
-    candidates = []
-    for i in range(0, len(all_codes), CODE_BATCH):
-        batch_codes = all_codes[i : i + CODE_BATCH]
-        df = _load_quotes_batch(session, batch_codes, start, trade_date)
-        if df.empty:
-            continue
-        for code, sdf in df.groupby("code"):
-            sdf = sdf.reset_index(drop=True)
-            if sdf.iloc[-1]["trade_date"] != trade_date:
-                continue  # 当日停牌/无数据
-            b = basics.get(code)
-            ind_pct = industry_pct_map.get(b.industry) if b and b.industry else None
-            row = compute_one_stock(
-                sdf, params,
-                basic=b,
-                market_pct=market_pct,
-                has_negative_event=code in negative_codes,
-                industry_pct=ind_pct,
-            )
-            factor_rows.append(dict(code=code, trade_date=trade_date, param_version=param_version, **row))
-            if row["passed_hard_filter"] and row["in_pullback_window"] and row["total_score"] > 0:
-                candidates.append((code, row, sdf.iloc[-1]))
-
-    bulk_upsert(session, StockFactor, factor_rows)
-    log.info("%s 因子落库 %d 票, 硬过滤通过 %d, 候选 %d",
-             trade_date, len(factor_rows),
-             sum(1 for r in factor_rows if r["passed_hard_filter"]), len(candidates))
-
-    # 4. 快照只写不改：当日该参数版本已有则跳过(不同版本可并存)
+    """候选 → 分组取 Top N 落快照(只写不改)。candidates: [(code,row,last),...]。"""
     existing = session.scalar(
         select(PickSnapshot.id).where(
             PickSnapshot.trade_date == trade_date,
@@ -242,7 +190,6 @@ def run_selection(
         log.info("%s 快照已存在(版本%s),跳过(只写不改)", trade_date, param_version)
         return []
 
-    # 5. 分组取 Top N 落快照：主板(main) 与 非主板(other) 各独立排名取 top_n
     top_n = params["selection"]["top_n"]
     grouped: dict[str, list] = {"main": [], "other": []}
     for code, row, last in candidates:
@@ -279,7 +226,93 @@ def run_selection(
             ))
     if snapshot_rows:
         bulk_upsert(session, PickSnapshot, snapshot_rows)
-    log.info("%s 选出 %d 票入快照 (主板 %d, 非主板 %d)", trade_date, len(snapshot_rows),
+    log.info("%s [%s] 选出 %d 票入快照 (主板 %d, 非主板 %d)", trade_date, param_version,
+             len(snapshot_rows),
              sum(1 for r in snapshot_rows if r["board_group"] == "main"),
              sum(1 for r in snapshot_rows if r["board_group"] == "other"))
     return snapshot_rows
+
+
+def run_selection_multi(
+    session: Session,
+    trade_date: date,
+    version_params: dict[str, dict],
+    negative_codes: set[str] | None = None,
+) -> dict[str, list[dict]]:
+    """多版本共享加载选股：分批加载行情，每批对所有版本各算因子，省掉重复加载。
+
+    version_params: {版本号: params}。返回 {版本号: 快照行列表}。
+    内存峰值仍≈单批(每批算完即释放);相比逐版本调 run_selection,
+    全市场窗口数据只加载一遍(而非每版本一遍)。
+    """
+    negative_codes = negative_codes or set()
+    versions = list(version_params)
+
+    # 1. 大盘开关(各版本 params 的 hard 相同,用任一版本算一次即可)
+    ms = compute_market_status(session, trade_date, version_params[versions[0]])
+    log.info("%s 大盘开关: %s (%s)", trade_date, "开" if ms.is_open else "关", ms.reason or "正常")
+
+    start = _window_start(session, trade_date)
+    if start is None:
+        log.warning("%s 无行情数据", trade_date)
+        return {v: [] for v in versions}
+    market_pct = ms.sh_pct_chg
+    all_codes = list(session.scalars(select(DailyQuote.code).distinct()))
+    basics = {b.code: b for b in session.scalars(select(StockBasic)).all()}
+
+    # 行业强度：任一版本启用就算(只查当日一天)
+    industry_pct_map: dict[str, float] = {}
+    if any(p.get("use_industry_strength") for p in version_params.values()):
+        industry_pct_map = _today_industry_pct(session, trade_date, basics)
+
+    # 2. 分批加载,每批对每个版本各算因子
+    factor_rows: dict[str, list] = {v: [] for v in versions}
+    candidates: dict[str, list] = {v: [] for v in versions}
+    for i in range(0, len(all_codes), CODE_BATCH):
+        df = _load_quotes_batch(session, all_codes[i : i + CODE_BATCH], start, trade_date)
+        if df.empty:
+            continue
+        for code, sdf in df.groupby("code"):
+            sdf = sdf.reset_index(drop=True)
+            if sdf.iloc[-1]["trade_date"] != trade_date:
+                continue
+            b = basics.get(code)
+            ind_pct = industry_pct_map.get(b.industry) if b and b.industry else None
+            neg = code in negative_codes
+            for ver in versions:
+                row = compute_one_stock(
+                    sdf, version_params[ver], basic=b, market_pct=market_pct,
+                    has_negative_event=neg, industry_pct=ind_pct,
+                )
+                factor_rows[ver].append(
+                    dict(code=code, trade_date=trade_date, param_version=ver, **row))
+                if row["passed_hard_filter"] and row["in_pullback_window"] and row["total_score"] > 0:
+                    candidates[ver].append((code, row, sdf.iloc[-1]))
+
+    # 3. 各版本落因子 + 快照
+    result = {}
+    for ver in versions:
+        bulk_upsert(session, StockFactor, factor_rows[ver])
+        log.info("%s [%s] 因子落库 %d 票, 硬过滤通过 %d, 候选 %d", trade_date, ver,
+                 len(factor_rows[ver]),
+                 sum(1 for r in factor_rows[ver] if r["passed_hard_filter"]),
+                 len(candidates[ver]))
+        result[ver] = _persist_snapshot(
+            session, trade_date, ver, version_params[ver], candidates[ver], basics)
+    return result
+
+
+def run_selection(
+    session: Session,
+    trade_date: date,
+    params: dict,
+    param_version: str,
+    negative_codes: set[str] | None = None,
+) -> list[dict]:
+    """执行某交易日单版本选股全流程，返回写入的快照行（已存在则返回空）。
+
+    单版本入口(回测/手动单版本用);多版本同日选股用 run_selection_multi 共享加载。
+    """
+    return run_selection_multi(
+        session, trade_date, {param_version: params}, negative_codes
+    )[param_version]

@@ -19,7 +19,7 @@ from common.params import (
 )
 from engine.datasource.pipeline import sync_daily_all
 from engine.datasource.tushare_source import TushareSource
-from engine.selection.selector import run_selection
+from engine.selection.selector import run_selection_multi
 from engine.validation.validator import backfill_validations
 
 log = setup_logging("daily_pipeline")
@@ -45,7 +45,7 @@ def main() -> None:
     except Exception:
         log.exception("日线更新失败,继续后续步骤(用已有数据)")
 
-    # 2. 选股：v1/v2 双版本对库内最新交易日各跑一次
+    # 2. 选股：v1/v2 双版本共享加载,对库内最新交易日一次跑完(行情只加载一遍)
     try:
         with session_scope() as s:
             seed_default_params(s)
@@ -54,13 +54,9 @@ def main() -> None:
         if latest is None:
             log.error("库内无行情,跳过选股")
         else:
-            for ver in VERSIONS:
-                try:
-                    with session_scope() as s:
-                        params = load_params_by_version(s, ver)
-                        run_selection(s, latest, params, ver)
-                except Exception:
-                    log.exception("选股失败 版本%s", ver)
+            with session_scope() as s:
+                version_params = {ver: load_params_by_version(s, ver) for ver in VERSIONS}
+                run_selection_multi(s, latest, version_params)
     except Exception:
         log.exception("选股阶段失败")
 
