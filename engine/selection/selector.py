@@ -45,9 +45,11 @@ FACTOR_DEFS = [
 WINDOW_DAYS = 140  # 因子所需最长回看窗口(交易日)
 
 
-def _load_quotes_window(session: Session, trade_date: date) -> pd.DataFrame:
-    """加载全市场截至 trade_date 的近 WINDOW_DAYS 个交易日行情。"""
-    # 先取窗口起始日期
+CODE_BATCH = 800  # 每批加载的股票数，控内存峰值(全市场一次性会OOM,见 backtest-perf-todo)
+
+
+def _window_start(session: Session, trade_date: date) -> date | None:
+    """近 WINDOW_DAYS 个交易日的起始日期。"""
     dates = session.scalars(
         select(DailyQuote.trade_date)
         .where(DailyQuote.trade_date <= trade_date)
@@ -55,31 +57,58 @@ def _load_quotes_window(session: Session, trade_date: date) -> pd.DataFrame:
         .order_by(DailyQuote.trade_date.desc())
         .limit(WINDOW_DAYS)
     ).all()
-    if not dates:
-        return pd.DataFrame()
-    start = min(dates)
-    # 因子用原始(未复权)价计算：raw_* 列全程齐全，而复权列(open/high/low/close)
-    # 在 tushare 增量数据上留空。这里取 raw_* 并映射成因子约定的 open/high/low/close
-    # 列名，因子代码无需感知。raw_close 单列额外保留供 decision_raw_close 落快照用。
+    return min(dates) if dates else None
+
+
+def _load_quotes_batch(
+    session: Session, codes: list[str], start: date, trade_date: date
+) -> pd.DataFrame:
+    """加载指定一批股票在 [start, trade_date] 窗口内的行情。
+
+    因子用原始(未复权)价：raw_* 列全程齐全，复权列在 tushare 增量数据上留空。
+    取 raw_* 映射成因子约定的 open/high/low/close 列名，因子代码无需感知。
+    raw_close 单列额外保留供 decision_raw_close 落快照用。
+    """
     rows = session.execute(
         select(
             DailyQuote.code, DailyQuote.trade_date,
             DailyQuote.raw_open, DailyQuote.raw_high, DailyQuote.raw_low,
             DailyQuote.raw_close, DailyQuote.volume,
             DailyQuote.amount, DailyQuote.pct_chg, DailyQuote.turnover,
-        ).where(DailyQuote.trade_date >= start, DailyQuote.trade_date <= trade_date)
+        ).where(
+            DailyQuote.code.in_(codes),
+            DailyQuote.trade_date >= start,
+            DailyQuote.trade_date <= trade_date,
+        )
     ).all()
     df = pd.DataFrame(
         rows,
         columns=["code", "trade_date", "open", "high", "low", "close",
                  "volume", "amount", "pct_chg", "turnover"],
     )
+    if df.empty:
+        return df
     df["raw_close"] = df["close"]  # 原始收盘别名，落快照 decision_raw_close 用
     # DECIMAL 列从库里取出是 Decimal，转 float 供 pandas/numpy 数值运算
     num_cols = ["open", "high", "low", "close", "raw_close",
                 "volume", "amount", "pct_chg", "turnover"]
     df[num_cols] = df[num_cols].astype(float)
     return df.sort_values(["code", "trade_date"]).reset_index(drop=True)
+
+
+def _today_industry_pct(session: Session, trade_date: date, basics: dict) -> dict[str, float]:
+    """当日各行业平均涨幅(证监会行业)。只查当日全市场一天的数据,内存极小。"""
+    rows = session.execute(
+        select(DailyQuote.code, DailyQuote.pct_chg)
+        .where(DailyQuote.trade_date == trade_date)
+    ).all()
+    df = pd.DataFrame(rows, columns=["code", "pct_chg"])
+    if df.empty:
+        return {}
+    df["pct_chg"] = df["pct_chg"].astype(float)
+    df["industry"] = df["code"].map(lambda c: basics[c].industry if c in basics else None)
+    valid = df[df["industry"].notna() & (df["industry"] != "")]
+    return valid.groupby("industry")["pct_chg"].mean().to_dict()
 
 
 def compute_one_stock(
@@ -156,44 +185,46 @@ def run_selection(
     ms = compute_market_status(session, trade_date, params)
     log.info("%s 大盘开关: %s (%s)", trade_date, "开" if ms.is_open else "关", ms.reason or "正常")
 
-    # 2. 加载行情窗口
-    df = _load_quotes_window(session, trade_date)
-    if df.empty:
+    # 2. 行情窗口起始日 + 全市场代码列表(只取代码,不加载行情,内存小)
+    start = _window_start(session, trade_date)
+    if start is None:
         log.warning("%s 无行情数据", trade_date)
         return []
     market_pct = ms.sh_pct_chg
+    all_codes = list(session.scalars(select(DailyQuote.code).distinct()))
 
     basics = {b.code: b for b in session.scalars(select(StockBasic)).all()}
 
-    # 2b. 自算行业强度：当日各行业平均涨幅(证监会行业,数据自给自足)
+    # 2b. 自算行业强度：当日各行业平均涨幅(只查当日一天,内存极小)
     industry_pct_map: dict[str, float] = {}
     if params.get("use_industry_strength"):
-        today_df = df[df["trade_date"] == trade_date].copy()
-        today_df["industry"] = today_df["code"].map(
-            lambda c: basics[c].industry if c in basics else None
-        )
-        valid = today_df[today_df["industry"].notna() & (today_df["industry"] != "")]
-        industry_pct_map = valid.groupby("industry")["pct_chg"].mean().to_dict()
+        industry_pct_map = _today_industry_pct(session, trade_date, basics)
 
-    # 3. 逐票计算因子
+    # 3. 分批加载行情、逐票计算因子。每批算完即释放,峰值≈单批而非全市场。
+    #    分批不影响结果:每票因子只看自己的窗口,票与票之间独立。
     factor_rows = []
     candidates = []
-    for code, sdf in df.groupby("code"):
-        sdf = sdf.reset_index(drop=True)
-        if sdf.iloc[-1]["trade_date"] != trade_date:
-            continue  # 当日停牌/无数据
-        b = basics.get(code)
-        ind_pct = industry_pct_map.get(b.industry) if b and b.industry else None
-        row = compute_one_stock(
-            sdf, params,
-            basic=b,
-            market_pct=market_pct,
-            has_negative_event=code in negative_codes,
-            industry_pct=ind_pct,
-        )
-        factor_rows.append(dict(code=code, trade_date=trade_date, param_version=param_version, **row))
-        if row["passed_hard_filter"] and row["in_pullback_window"] and row["total_score"] > 0:
-            candidates.append((code, row, sdf.iloc[-1]))
+    for i in range(0, len(all_codes), CODE_BATCH):
+        batch_codes = all_codes[i : i + CODE_BATCH]
+        df = _load_quotes_batch(session, batch_codes, start, trade_date)
+        if df.empty:
+            continue
+        for code, sdf in df.groupby("code"):
+            sdf = sdf.reset_index(drop=True)
+            if sdf.iloc[-1]["trade_date"] != trade_date:
+                continue  # 当日停牌/无数据
+            b = basics.get(code)
+            ind_pct = industry_pct_map.get(b.industry) if b and b.industry else None
+            row = compute_one_stock(
+                sdf, params,
+                basic=b,
+                market_pct=market_pct,
+                has_negative_event=code in negative_codes,
+                industry_pct=ind_pct,
+            )
+            factor_rows.append(dict(code=code, trade_date=trade_date, param_version=param_version, **row))
+            if row["passed_hard_filter"] and row["in_pullback_window"] and row["total_score"] > 0:
+                candidates.append((code, row, sdf.iloc[-1]))
 
     bulk_upsert(session, StockFactor, factor_rows)
     log.info("%s 因子落库 %d 票, 硬过滤通过 %d, 候选 %d",
