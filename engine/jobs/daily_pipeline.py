@@ -20,6 +20,7 @@ from common.params import (
 from engine.datasource.pipeline import sync_daily_all
 from engine.datasource.tushare_source import TushareSource
 from engine.selection.selector import run_selection_multi
+from engine.jobs.watch_pool import detect_new_entries, track_daily
 from engine.validation.validator import backfill_validations
 
 log = setup_logging("daily_pipeline")
@@ -67,6 +68,16 @@ def main() -> None:
             backfill_validations(s, params)
     except Exception:
         log.exception("验证回填失败")
+
+    # 4. 低位首板监控池：检测新入池 + 跟踪量价 + 结算命中/到期
+    #    与选股完全独立(不同形态、不同验证口径)，失败不影响前三步已完成的工作。
+    try:
+        with session_scope() as s:
+            detect_new_entries(s, lookback_days=1)
+        with session_scope() as s:
+            track_daily(s)
+    except Exception:
+        log.exception("监控池更新失败")
 
     log.info("===== 每日管线结束 =====")
 

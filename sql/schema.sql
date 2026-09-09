@@ -201,3 +201,59 @@ CREATE TABLE IF NOT EXISTS benchmark_sample (
   UNIQUE KEY uq_benchmark_source (source_id),
   KEY idx_benchmark_code (code)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='实盘标注样本';
+
+-- ============================ 监控池 ============================
+CREATE TABLE IF NOT EXISTS watch_pool (
+  id             BIGINT      NOT NULL AUTO_INCREMENT,
+  code           VARCHAR(10) NOT NULL,
+  name           VARCHAR(32) NOT NULL DEFAULT '',
+  board_group    VARCHAR(8)  NOT NULL DEFAULT 'main',
+  trigger_date   DATE        NOT NULL COMMENT '首板日',
+  confirm_date   DATE        COMMENT '入池可见日(=首板日)',
+  trigger_close  DECIMAL(12,3) COMMENT '首板日原始收盘',
+  trigger_pct    FLOAT       COMMENT '首板日涨幅%',
+  trigger_amount DECIMAL(20,2) COMMENT '首板日成交额',
+  gain_from_low  FLOAT       NOT NULL COMMENT '距120日低点涨幅%',
+  trigger_vol_ratio FLOAT    COMMENT '首板日放量倍数(vs前20日均额)',
+  flat_days      INT         COMMENT '低位横盘天数(仅记录,IC≈0不计分)',
+  entry_score    FLOAT       COMMENT '入池评分0~1(无未来函数)',
+  entry_score_json TEXT      COMMENT '入池分项JSON',
+  consec_boards  INT         COMMENT '首板起连板数(1=孤板)',
+  entry_type     VARCHAR(12) COMMENT 'solo/consecutive',
+  broke_open_date DATE       COMMENT '跌破首板开盘价日(标记非删除)',
+  broke_open_days INT        COMMENT '距首板天数',
+  live_score     FLOAT       COMMENT '跟踪评分0~1(含连板/跌破)',
+  status         VARCHAR(12) NOT NULL DEFAULT 'watching' COMMENT 'watching/hit/expired',
+  hit_date       DATE,
+  hit_days       INT         COMMENT '距首板交易日数',
+  expire_date    DATE        COMMENT '30交易日窗口末日',
+  created_at     DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at     DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_watch_code_trigger (code, trigger_date),
+  KEY idx_watch_code (code),
+  KEY idx_watch_trigger (trigger_date),
+  KEY idx_watch_confirm (confirm_date),
+  KEY idx_watch_status (status),
+  KEY idx_watch_consec (consec_boards),
+  KEY idx_watch_entry (entry_type),
+  KEY idx_watch_entry_score (entry_score),
+  KEY idx_watch_live_score (live_score)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='低位首板监控池(只写不改)';
+
+CREATE TABLE IF NOT EXISTS watch_pool_daily (
+  id           BIGINT      NOT NULL AUTO_INCREMENT,
+  pool_id      BIGINT      NOT NULL,
+  code         VARCHAR(10) NOT NULL,
+  trade_date   DATE        NOT NULL,
+  days_since   INT         COMMENT '距首板第N个交易日',
+  close        DECIMAL(12,3) COMMENT '原始收盘',
+  pct_chg      FLOAT,
+  ret_since    FLOAT       COMMENT '相对首板收盘%',
+  amount_ratio FLOAT       COMMENT '成交额/首板日成交额',
+  is_limit_up  TINYINT(1)  NOT NULL DEFAULT 0,
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_wpd_pool_date (pool_id, trade_date),
+  KEY idx_wpd_code (code),
+  KEY idx_wpd_date (trade_date)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='监控池每日量价跟踪';

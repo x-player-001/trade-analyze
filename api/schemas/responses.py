@@ -157,3 +157,58 @@ class KlineOut(BaseModel):
     adjust: str               # hfq=后复权 / none=不复权
     bars: List[KlineBar]
     marks: List[KlineMark]    # 区间内该股被选中的日期(画买点标记用)
+
+
+# ---------------- 监控池 ----------------
+class WatchTrackOut(BaseModel):
+    """池内标的的单日跟踪点。"""
+    trade_date: date
+    days_since: int           # 距首板第N个交易日
+    close: Optional[float] = None
+    pct_chg: Optional[float] = None
+    ret_since: Optional[float] = None      # 相对首板日收盘%
+    amount_ratio: Optional[float] = None   # 成交额/首板日成交额
+    is_limit_up: bool = False
+
+
+class WatchPoolOut(ORMModel):
+    id: int
+    code: str
+    name: str
+    board_group: str
+    trigger_date: date        # 首板日
+    confirm_date: Optional[date] = None    # 确认非连板日(入池可见日)
+    trigger_close: Optional[float] = None
+    trigger_pct: Optional[float] = None
+    gain_from_low: float      # 距120日低点涨幅%(低位程度)
+    trigger_vol_ratio: Optional[float] = None   # 首板放量倍数(最强因子,越小越好)
+    flat_days: Optional[int] = None             # 低位横盘天数(仅展示,IC≈0不计分)
+    entry_score: Optional[float] = None         # 入池评分0~1(无未来函数)
+    entry_scores: Dict[str, float] = {}         # 入池分项
+    live_score: Optional[float] = None          # 跟踪评分0~1(含连板/跌破)
+    broke_open_date: Optional[date] = None      # 跌破首板开盘价日(标记非删除)
+    broke_open_days: Optional[int] = None
+    consec_boards: Optional[int] = None    # 首板起连板数(1=孤板)
+    entry_type: Optional[str] = None       # solo / consecutive
+    status: str               # watching / hit / expired
+    hit_date: Optional[date] = None
+    hit_days: Optional[int] = None
+    expire_date: Optional[date] = None
+    # 最近一个跟踪点的量价(列表页展示用)
+    last_ret_since: Optional[float] = None
+    last_amount_ratio: Optional[float] = None
+    days_in_pool: Optional[int] = None
+    track: List[WatchTrackOut] = []        # 仅详情接口填充
+
+
+class WatchPoolStatsOut(BaseModel):
+    """监控池命中率统计(已结算样本)。"""
+    total: int
+    watching: int
+    hit: int
+    expired: int
+    hit_rate: Optional[float] = None       # hit/(hit+expired) %
+    avg_hit_days: Optional[float] = None
+    # 按形态分组的命中率(solo=孤板 / consecutive=连板)
+    by_entry_type: Dict[str, float] = {}
+    benchmark_hint: str = "历史基准：孤板 32.63% / 连板 67.08% / 随机 19.87%"

@@ -11,6 +11,8 @@
 - validation_report  周度验证汇总
 - param_config       因子阈值参数版本
 - benchmark_sample   71条实盘标注样本（监督校准）
+- watch_pool         低位首板监控池（入池事件，只写不改）
+- watch_pool_daily   监控池每日量价跟踪
 """
 from __future__ import annotations
 
@@ -298,3 +300,104 @@ class BenchmarkSample(Base, TimestampMixin):
     # 反推：系统在 buy_date 给该票的打分与排名（监督校准时回填）
     system_score: Mapped[Optional[float]] = mapped_column(Float)
     system_rank: Mapped[Optional[int]] = mapped_column(Integer)
+
+
+# ---------------------------------------------------------------------------
+# 监控池：低位首板入池 + 每日跟踪
+# ---------------------------------------------------------------------------
+class WatchPool(Base, TimestampMixin):
+    """低位首板监控池——一次入池事件一行，只写不改（同 pick_snapshot 的凭证原则）。
+
+    入池条件（engine/jobs/watch_pool.py）：低位 + 首板，只用决策时点已知信息。
+    首板后是否连板【不作为入池条件】——那是入池之后才发生的事，拿来筛选
+    等于用未来信息；改由 consec_boards/entry_type 记录，供事后分组统计
+    （历史：孤板 32.6% vs 连板 67.1% vs 随机基准 19.9%）。
+    入池后由 watch_pool_daily 逐日跟踪量价演化，不预判缩量/放量好坏——
+    两种形态在历史数据上表现相反（缩量15% vs 放量43%），交由数据判定。
+    """
+
+    __tablename__ = "watch_pool"
+    __table_args__ = (
+        UniqueConstraint("code", "trigger_date", name="uq_watch_code_trigger"),
+    )
+
+    id: Mapped[int] = mapped_column(BigIntPK, primary_key=True, autoincrement=True)
+    code: Mapped[str] = mapped_column(String(10), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(32), nullable=False, default="")
+    board_group: Mapped[str] = mapped_column(String(8), nullable=False, default="main")
+    # 首板日（触发入池的涨停日）
+    trigger_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    # 入池可见日：=首板日（入池判定不依赖未来信息，当日盘后即可见）
+    confirm_date: Mapped[Optional[date]] = mapped_column(Date, index=True)
+    trigger_close: Mapped[float] = mapped_column(Price, comment="首板日原始收盘")
+    trigger_pct: Mapped[float] = mapped_column(Float, comment="首板日涨幅%")
+    trigger_amount: Mapped[Optional[float]] = mapped_column(Money, comment="首板日成交额")
+    # 首板日距120日最低收盘的涨幅%（低位程度，越小越低位）
+    gain_from_low: Mapped[float] = mapped_column(Float, comment="距120日低点涨幅%")
+    # ---- 入池时因子（只用首板日及之前的信息，无未来函数）----
+    # 首板日成交额 / 前20日均额。实测最强因子(IC -0.098)：放量越夸张后续越差
+    # (<2倍 42.7% vs 6-10倍 22.0%)，对应「放量说明有抛压」。
+    trigger_vol_ratio: Mapped[Optional[float]] = mapped_column(
+        Float, comment="首板日放量倍数(vs前20日均额)"
+    )
+    # 低位横盘天数：首板前连续多少日收盘在 120日低点×1.3 以内。
+    # 实测 IC≈0.0007（无区分度），仅作展示记录，【不参与评分】。
+    flat_days: Mapped[Optional[int]] = mapped_column(Integer, comment="低位横盘天数")
+    # 入池评分 0~1：只用首板日已知信息，入池即定，不随行情变化
+    entry_score: Mapped[Optional[float]] = mapped_column(
+        Float, index=True, comment="入池评分0~1(无未来函数)"
+    )
+    entry_score_json: Mapped[Optional[str]] = mapped_column(Text, comment="入池分项JSON")
+    # 首板起连续涨停板数（含首板本身：1=孤板，2=二连板，…）。
+    # 【观测字段，非入池条件】——连板发生在入池之后，拿它筛选等于用未来信息。
+    # 由 track_daily 在行情走出后回填，用于分组统计两类形态的差异。
+    consec_boards: Mapped[Optional[int]] = mapped_column(
+        Integer, index=True, comment="首板起连板数(1=孤板)"
+    )
+    # 形态分组：solo=首板后未连板 / consecutive=连板。consec_boards 回填后派生
+    entry_type: Mapped[Optional[str]] = mapped_column(
+        String(12), index=True, comment="solo/consecutive"
+    )
+    # 池内状态：watching=跟踪中 / hit=已再次涨停 / expired=30日窗口结束未涨停
+    status: Mapped[str] = mapped_column(
+        String(12), nullable=False, default="watching", index=True
+    )
+    # 再次涨停的日期与间隔（命中时回填）
+    hit_date: Mapped[Optional[date]] = mapped_column(Date)
+    hit_days: Mapped[Optional[int]] = mapped_column(Integer, comment="距首板交易日数")
+    expire_date: Mapped[Optional[date]] = mapped_column(Date, comment="30交易日窗口末日")
+
+    # ---- 跟踪期演化（入池后才知道，含未来信息，仅供筛选展示不可用于入池决策）----
+    # 跌破首板日开盘价的日期与距首板天数。
+    # 【标记而非删除】：实测删除规则虽把留存池命中率从 39.7% 提到 60.5%，
+    # 但会误杀 170 只(占全部命中的 36.5%)，且删掉就无法再验证。故只打标，
+    # 前端默认过滤，需要全量时随时可查。
+    broke_open_date: Mapped[Optional[date]] = mapped_column(Date, comment="跌破首板开盘价日")
+    broke_open_days: Mapped[Optional[int]] = mapped_column(Integer, comment="距首板天数")
+    # 跟踪评分 0~1：入池评分 + 演化信息(连板/是否跌破)，随行情更新
+    live_score: Mapped[Optional[float]] = mapped_column(
+        Float, index=True, comment="跟踪评分0~1(含演化信息)"
+    )
+
+
+class WatchPoolDaily(Base):
+    """监控池每日量价跟踪——入池后每个交易日一行，供前端画演化与后续建模。"""
+
+    __tablename__ = "watch_pool_daily"
+    __table_args__ = (
+        UniqueConstraint("pool_id", "trade_date", name="uq_wpd_pool_date"),
+    )
+
+    id: Mapped[int] = mapped_column(BigIntPK, primary_key=True, autoincrement=True)
+    pool_id: Mapped[int] = mapped_column(BigIntPK, nullable=False, index=True)
+    code: Mapped[str] = mapped_column(String(10), nullable=False, index=True)
+    trade_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    days_since: Mapped[int] = mapped_column(Integer, comment="距首板第N个交易日")
+    close: Mapped[Optional[float]] = mapped_column(Price, comment="原始收盘")
+    pct_chg: Mapped[Optional[float]] = mapped_column(Float)
+    # 相对首板日收盘的累计涨跌%
+    ret_since: Mapped[Optional[float]] = mapped_column(Float, comment="相对首板收盘%")
+    # 成交额比：当日成交额 / 首板日成交额。用 amount 而非 volume——
+    # volume 字段在 2026-06-15 切 tushare 时单位由股变手(100倍断层)，跨该日不可比。
+    amount_ratio: Mapped[Optional[float]] = mapped_column(Float, comment="额比vs首板日")
+    is_limit_up: Mapped[bool] = mapped_column(Boolean, default=False)
