@@ -47,16 +47,39 @@ def recent_trade_dates(session, n: int) -> list[date]:
     return sorted(rows)
 
 
-def load_window(session, start: date, end: date) -> pd.DataFrame:
-    """加载全市场 [start, end] 行情,列名与 selector 约定一致(用 raw_* 价)。"""
+def find_surge_events(session, event_dates: list[date], threshold: float):
+    """轻量 SQL:只筛事件区间内单日涨幅≥阈值的 (code, 大涨日, 涨幅)。
+    返回行数=命中事件数(通常几百行),不拉全市场,内存友好。"""
     rows = session.execute(
-        select(
-            DailyQuote.code, DailyQuote.trade_date,
-            DailyQuote.raw_open, DailyQuote.raw_high, DailyQuote.raw_low,
-            DailyQuote.raw_close, DailyQuote.volume,
-            DailyQuote.amount, DailyQuote.pct_chg, DailyQuote.turnover,
-        ).where(DailyQuote.trade_date >= start, DailyQuote.trade_date <= end)
+        select(DailyQuote.code, DailyQuote.trade_date, DailyQuote.pct_chg)
+        .where(
+            DailyQuote.trade_date >= event_dates[0],
+            DailyQuote.trade_date <= event_dates[-1],
+            DailyQuote.pct_chg >= threshold,
+        )
     ).all()
+    return [(c, d, float(p)) for c, d, p in rows]
+
+
+def load_window(session, codes: list[str], start: date, end: date) -> pd.DataFrame:
+    """只加载给定 codes 在 [start, end] 的行情(分批 IN 查询,避免一次拉全市场)。
+    列名与 selector 约定一致(用 raw_* 价)。"""
+    rows = []
+    CHUNK = 300  # 每批 code 数,控制单条 SQL 结果集大小
+    for i in range(0, len(codes), CHUNK):
+        batch = codes[i : i + CHUNK]
+        rows.extend(session.execute(
+            select(
+                DailyQuote.code, DailyQuote.trade_date,
+                DailyQuote.raw_open, DailyQuote.raw_high, DailyQuote.raw_low,
+                DailyQuote.raw_close, DailyQuote.volume,
+                DailyQuote.amount, DailyQuote.pct_chg, DailyQuote.turnover,
+            ).where(
+                DailyQuote.code.in_(batch),
+                DailyQuote.trade_date >= start,
+                DailyQuote.trade_date <= end,
+            )
+        ).all())
     df = pd.DataFrame(
         rows,
         columns=["code", "trade_date", "open", "high", "low", "close",
@@ -86,29 +109,30 @@ def main() -> None:
         if not event_dates:
             print("无行情数据"); return
         ev_start, ev_end = event_dates[0], event_dates[-1]
-        # 决策日窗口要往前再多取 WINDOW_DAYS 才能算因子;一次性全市场加载
+        # 完整交易日历(仅 distinct 日期,轻量):决策日=大涨日前一交易日
         all_dates = recent_trade_dates(s, args.days + WINDOW_DAYS + 5)
         win_start = all_dates[0]
-        log.info("加载全市场行情 %s ~ %s ...", win_start, ev_end)
-        df = load_window(s, win_start, ev_end)
-        if df.empty:
-            print("窗口内无数据"); return
-
-        date_list = sorted(df["trade_date"].unique())
-        # 决策日 = 命中日的前一交易日
-        prev_of = {date_list[i]: date_list[i - 1] for i in range(1, len(date_list))}
+        prev_of = {all_dates[i]: all_dates[i - 1] for i in range(1, len(all_dates))}
 
         print("\n############### 召回反查 v=%s | 命中口径:单日涨幅≥%.1f%% | 事件区间 %s~%s (%d个交易日) ###############"
               % (args.version, args.threshold, ev_start, ev_end, len(event_dates)))
 
-        # 1. 找命中事件:事件区间内单日涨幅 >= 阈值
-        ev_df = df[(df["trade_date"].isin(event_dates)) & (df["pct_chg"] >= args.threshold)]
-        # 去重到 (code, 决策日):同一票多日大涨,各算一次决策日反查
+        # 1. 轻量 SQL 先筛命中事件(只返回大涨的几百行,不拉全市场)
+        surges = find_surge_events(s, event_dates, args.threshold)
         events = []  # (code, decision_date, surge_date, surge_pct)
-        for r in ev_df.itertuples(index=False):
-            dd = prev_of.get(r.trade_date)
+        for code, sd, spct in surges:
+            dd = prev_of.get(sd)
             if dd is not None:
-                events.append((r.code, dd, r.trade_date, r.pct_chg))
+                events.append((code, dd, sd, spct))
+        if not events:
+            print("命中事件数: 0"); return
+
+        # 2. 只对涉及的票拉因子窗口(分批 IN),而非全市场 5000 只
+        codes = sorted({e[0] for e in events})
+        log.info("命中票 %d 只,加载其 %s~%s 因子窗口 ...", len(codes), win_start, ev_end)
+        df = load_window(s, codes, win_start, ev_end)
+        if df.empty:
+            print("窗口内无数据"); return
         print("命中事件(票×大涨日)数: %d, 涉及股票 %d 只" %
               (len(events), len({e[0] for e in events})))
 
