@@ -102,7 +102,15 @@ class DailyQuote(Base):
     raw_high: Mapped[Optional[float]] = mapped_column(Price, comment="原始最高")
     raw_low: Mapped[Optional[float]] = mapped_column(Price, comment="原始最低")
     raw_close: Mapped[Optional[float]] = mapped_column(Price, comment="原始收盘")
-    volume: Mapped[float] = mapped_column(Money, comment="成交量(手)")
+    # 原样保留数据源写入值。【注意此列有单位断层】：2026-06-15 前(baostock源)
+    # 单位是「股」，之后(tushare源)是「手」，相差100倍。不修改此列以保留原始
+    # 凭证，因子一律改读 volume_std。
+    volume: Mapped[float] = mapped_column(Money, comment="成交量(原始,单位有断层)")
+    # 归一化成交量，统一为「手」：断点前 volume/100，断点后 = volume。
+    # 由 engine/jobs/fix_volume_std.py 回填，新数据在入库时同步填充。
+    volume_std: Mapped[Optional[float]] = mapped_column(
+        Money, comment="成交量(手,已归一化)"
+    )
     amount: Mapped[float] = mapped_column(Money, comment="成交额(元)")
     amplitude: Mapped[Optional[float]] = mapped_column(Float, comment="振幅(%)")
     pct_chg: Mapped[Optional[float]] = mapped_column(Float, comment="涨跌幅(%)")

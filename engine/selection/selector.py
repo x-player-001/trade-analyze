@@ -68,12 +68,16 @@ def _load_quotes_batch(
     因子用原始(未复权)价：raw_* 列全程齐全，复权列在 tushare 增量数据上留空。
     取 raw_* 映射成因子约定的 open/high/low/close 列名，因子代码无需感知。
     raw_close 单列额外保留供 decision_raw_close 落快照用。
+
+    成交量取 volume_std（归一化为「手」）而非 volume——后者在 2026-06-15
+    切 tushare 时单位由股变手，有100倍断层，跨该日的滚动窗口会失真
+    （vol_spike 恒不触发）。同样映射成 volume 列名，因子代码不变。
     """
     rows = session.execute(
         select(
             DailyQuote.code, DailyQuote.trade_date,
             DailyQuote.raw_open, DailyQuote.raw_high, DailyQuote.raw_low,
-            DailyQuote.raw_close, DailyQuote.volume,
+            DailyQuote.raw_close, DailyQuote.volume_std,
             DailyQuote.amount, DailyQuote.pct_chg, DailyQuote.turnover,
         ).where(
             DailyQuote.code.in_(codes),

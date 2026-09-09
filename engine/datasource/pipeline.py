@@ -19,6 +19,8 @@ from common.upsert import bulk_upsert
 from common.models import DailyQuote, IndexDaily, StockBasic
 from engine.datasource.base import DataSource
 
+VOLUME_CUTOVER = date(2026, 6, 15)  # volume 单位切换日(股→手),见 _with_volume_std
+
 log = get_logger("datasource.pipeline")
 
 # 大盘开关用指数：上证、创业板指
@@ -36,6 +38,21 @@ def _to_clean_records(df: pd.DataFrame) -> list[dict]:
     for r in records:
         cleaned.append({k: (None if pd.isna(v) else v) for k, v in r.items()})
     return cleaned
+
+
+def _with_volume_std(rows: list[dict]) -> list[dict]:
+    """给日线行补 volume_std（归一化成交量，统一「手」）。
+
+    volume 列有 100 倍单位断层：2026-06-15 前(baostock)是「股」，之后(tushare)
+    是「手」。新数据一律来自 tushare，已是「手」，故直接照搬；历史数据由
+    engine/jobs/fix_volume_std.py 回填。因子只读 volume_std，不读 volume。
+    """
+    for r in rows:
+        if r.get("volume_std") is None and r.get("volume") is not None:
+            td = r.get("trade_date")
+            v = r["volume"]
+            r["volume_std"] = v if (td is None or td >= VOLUME_CUTOVER) else v / 100
+    return rows
 
 
 def sync_stock_basic(ds: DataSource) -> int:
@@ -94,7 +111,7 @@ def _sync_one_daily(ds: DataSource, code: str, end: date, full: bool) -> int:
     if df.empty:
         return 0
     df = df.assign(code=code)
-    rows = _to_clean_records(df)
+    rows = _with_volume_std(_to_clean_records(df))
     with session_scope() as s:
         return bulk_upsert(s, DailyQuote, rows)
 
@@ -142,7 +159,7 @@ def sync_daily_all(ds, trade_dates: list[date]) -> int:
         if df.empty:
             log.info("%s 无数据(非交易日?)，跳过", td)
             continue
-        rows = _to_clean_records(df)
+        rows = _with_volume_std(_to_clean_records(df))
         with session_scope() as s:
             n = bulk_upsert(s, DailyQuote, rows)
         total += n

@@ -63,7 +63,7 @@ def find_surge_events(session, event_dates: list[date], threshold: float):
 
 def load_window(session, codes: list[str], start: date, end: date) -> pd.DataFrame:
     """只加载给定 codes 在 [start, end] 的行情(分批 IN 查询,避免一次拉全市场)。
-    列名与 selector 约定一致(用 raw_* 价)。"""
+    列名与 selector 约定一致(用 raw_* 价、volume_std 归一化成交量)。"""
     rows = []
     CHUNK = 300  # 每批 code 数,控制单条 SQL 结果集大小
     for i in range(0, len(codes), CHUNK):
@@ -72,7 +72,7 @@ def load_window(session, codes: list[str], start: date, end: date) -> pd.DataFra
             select(
                 DailyQuote.code, DailyQuote.trade_date,
                 DailyQuote.raw_open, DailyQuote.raw_high, DailyQuote.raw_low,
-                DailyQuote.raw_close, DailyQuote.volume,
+                DailyQuote.raw_close, DailyQuote.volume_std,
                 DailyQuote.amount, DailyQuote.pct_chg, DailyQuote.turnover,
             ).where(
                 DailyQuote.code.in_(batch),
