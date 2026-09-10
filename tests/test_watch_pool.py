@@ -269,3 +269,33 @@ def test_broke_open_marked_not_deleted(session):
     assert p.broke_open_days is not None
     assert p.id is not None                   # 仍在池中，未被删除
     assert p.live_score is not None
+
+
+def test_st_excluded_by_flag(session):
+    """ST 票不入池(is_st 标志)。"""
+    _seed(session, "600014", "main", FLAT + [10.0, -1.0, -2.0, 0.5, 0.3])
+    b = session.get(StockBasic, "600014")
+    b.is_st = True
+    session.commit()
+    assert detect_new_entries(session, lookback_days=10) == 0
+
+
+def test_st_excluded_by_name(session):
+    """名称含 ST/退 也排除——is_st 依赖低频 fetch_basic 可能滞后。
+
+    实测曾有 81 只 ST 票混入池中：它们首板当日还不是 ST(按10%/20%制度
+    交易,涨幅达10%~20%),之后才被戴帽,不能指望5%限制自然过滤。
+    """
+    for code, name in [("600015", "*ST华鹏"), ("600016", "ST金鸿"), ("600017", "中弘退")]:
+        _seed(session, code, "main", FLAT + [10.0, -1.0, -2.0, 0.5, 0.3])
+        b = session.get(StockBasic, code)
+        b.is_st = False          # 标志滞后未更新
+        b.name = name
+        session.commit()
+    assert detect_new_entries(session, lookback_days=10) == 0
+
+
+def test_normal_stock_still_enters(session):
+    """对照：非 ST 正常票不受影响。"""
+    _seed(session, "600018", "main", FLAT + [10.0, -1.0, -2.0, 0.5, 0.3])
+    assert detect_new_entries(session, lookback_days=10) == 1

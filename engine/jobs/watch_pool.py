@@ -3,6 +3,7 @@
 入池条件（只用决策时点已知的信息）：
     低位 = 首板日收盘距过去120交易日最低收盘涨幅 ≤ 30%
     首板 = 此前 60 个交易日无涨停
+    非ST = 排除 ST/退市风险票（「重大利空一律踢出」）
 
     【首板后是否连板不作为入池条件】——连板发生在入池之后，拿它筛选等于
     用未来信息。改由 consec_boards / entry_type 客观记录，供事后分组统计。
@@ -16,6 +17,9 @@
     入池后不预判缩量/放量好坏：两者在历史数据上表现相反
     （首板后5日缩额≤50% → 15.05%；放额>100%且涨>5% → 42.73%），
     故只做客观跟踪，由 watch_pool_daily 记录演化，留待验证后建模。
+
+标签：30个交易日内是否再次涨停（实测公允命中率 39.05%）。
+「低位放量」形态见 engine/jobs/watch_lowvol.py，它用收益率标签，独立成表。
 
 关键口径：
 - 涨停判定用 pct_chg（除权安全），阈值按板块：主板9.7/双创19.7/北交所29.7。
@@ -42,7 +46,7 @@ from common.db import session_scope
 from common.logging_conf import setup_logging
 from common.models import DailyQuote, StockBasic, WatchPool, WatchPoolDaily
 from common.upsert import bulk_upsert
-from engine.datasource.classify import board_group, classify_board
+from engine.datasource.classify import board_group, classify_board, is_st_name
 from engine.factors.watch_score import compute_entry_score, compute_live_score
 
 log = setup_logging("watch_pool")
@@ -55,8 +59,13 @@ CODE_BATCH = 400      # 分批加载股票数，控内存峰值(见 backtest-per
 
 
 def limit_threshold(code: str) -> float:
-    """涨停判定阈值%：留 0.3 余量吸收四舍五入。ST 票不单独处理——
-    ST 的 5% 限制会使其永不触发 9.7，等价于被排除，符合硬过滤本意。"""
+    """涨停判定阈值%：留 0.3 余量吸收四舍五入。
+
+    注意：不能指望「ST 涨跌幅限制 5%，永远达不到 9.7 所以自然被排除」——
+    实测池内曾混进 81 只 ST 票，涨幅都在 10%~20%。原因是它们在首板当日
+    还不是 ST（按 10%/20% 制度交易），之后才被戴帽。ST 必须显式过滤，
+    见 detect_new_entries 里的 is_st 排除。
+    """
     board = classify_board(code)
     if board in ("gem", "star"):
         return 19.7
@@ -188,6 +197,11 @@ def detect_new_entries(session: Session, lookback_days: int = 1) -> int:
         if gain > LOW_MAX_GAIN:
             continue  # 非低位
         b = basics.get(code)
+        # 排除 ST/退市风险票（「重大利空一律踢出」，与选股硬过滤同源）。
+        # 用 is_st 标志 + 名称双判：is_st 依赖 fetch_basic 低频更新可能滞后，
+        # 名称里的 ST/退 是更直接的证据。
+        if b is not None and (b.is_st or is_st_name(b.name or "")):
+            continue
         am_map = amounts.get(code, {})
         trig_amt = am_map.get(d)
         # 首板日放量倍数 = 当日成交额 / 前20日均额（不含当日）
@@ -235,7 +249,12 @@ def detect_new_entries(session: Session, lookback_days: int = 1) -> int:
 
 
 def track_daily(session: Session) -> int:
-    """对 watching 状态的池内票补齐每日量价跟踪，并结算 hit / expired。"""
+    """对 watching 状态的池内票补齐每日量价跟踪，并结算 hit / expired。
+
+    只服务低位首板池（标签=30日内再次涨停）。低位放量池有独立的
+    watch_lowvol.track_and_settle（标签=T+N收益率），不共用——
+    两者观测目标不同，曾共表共用结算导致 lowvol 命中率失真至 17.97%。
+    """
     pools = list(session.scalars(
         select(WatchPool).where(WatchPool.status == "watching")
     ).all())
