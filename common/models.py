@@ -15,6 +15,8 @@
 - watch_pool_daily   低位首板池每日量价跟踪
 - watch_lowvol       低位放量监控池（标签：T+N 收益率）
 - watch_lowvol_daily 低位放量池每日跟踪
+- market_sentiment   每日市场情绪温度（涨停/炸板/连板高度）
+- limitup_stock      每日涨停个股明细（含连板数、行业、封板资金）
 """
 from __future__ import annotations
 
@@ -504,3 +506,96 @@ class WatchLowvolDaily(Base):
     ret_since: Mapped[Optional[float]] = mapped_column(Float, comment="相对触发日收盘%")
     # 成交额比（用 amount 而非 volume：后者2026-06-15有100倍单位断层）
     amount_ratio: Mapped[Optional[float]] = mapped_column(Float, comment="额比vs触发日")
+
+
+# ---------------------------------------------------------------------------
+# 市场情绪：每日温度 + 涨停个股明细
+# ---------------------------------------------------------------------------
+class MarketSentiment(Base, TimestampMixin):
+    """每日市场情绪——连板梯队指标 + 6阶段周期。判断「当前环境能不能做」。
+
+    数据来自 akshare 东财涨停池系列（免费，实测新加坡服务器可连；
+    tushare 的 limit_list_d 要 5000 积分，这里零成本拿到等价数据）。
+
+    方法论参考 tick-stock-panel 的 market-phase.md（连板梯队驱动 + EMA平滑
+    + 2日确认 + 6阶段），**阈值尚未在本项目数据上校准**，见 sentiment.py 说明。
+
+    核心指标：
+    - advance_rate 晋级率 = 昨日连板池今日继续封板比例。**最核心**，
+      直接衡量接力成功率，是多个阶段判定的主变量。
+    - height/ge2/ge3/ge5  连板梯队宽度与高度
+    - tier_filled 梯队完整度：2..height 中非空档位数
+    - phase_raw  当日原始判定；phase 经2日确认后的稳定标签
+    """
+
+    __tablename__ = "market_sentiment"
+
+    trade_date: Mapped[date] = mapped_column(Date, primary_key=True)
+    # ---- 原始计数 ----
+    zt_count: Mapped[int] = mapped_column(Integer, default=0, comment="涨停家数")
+    zb_count: Mapped[int] = mapped_column(Integer, default=0, comment="炸板家数")
+    seal_rate: Mapped[Optional[float]] = mapped_column(
+        Float, comment="封板率%=涨停/(涨停+炸板)"
+    )
+    strong_count: Mapped[int] = mapped_column(Integer, default=0, comment="强势股家数")
+    # ---- 连板梯队 ----
+    first_board: Mapped[int] = mapped_column(Integer, default=0, comment="首板家数")
+    ge2: Mapped[int] = mapped_column(Integer, default=0, comment="2板以上家数")
+    ge3: Mapped[int] = mapped_column(Integer, default=0, comment="3板以上家数")
+    ge5: Mapped[int] = mapped_column(Integer, default=0, comment="5板以上家数")
+    height: Mapped[int] = mapped_column(Integer, default=0, comment="最高连板数")
+    tier_filled: Mapped[int] = mapped_column(
+        Integer, default=0, comment="梯队完整度(2..height非空档位数)"
+    )
+    # ---- 接力效应 ----
+    advance_rate: Mapped[Optional[float]] = mapped_column(
+        Float, index=True, comment="晋级率(昨连板池今日续板比例)"
+    )
+    prev_zt_avg_pct: Mapped[Optional[float]] = mapped_column(
+        Float, comment="昨日涨停股今日平均涨跌幅%"
+    )
+    prev_zt_win_rate: Mapped[Optional[float]] = mapped_column(
+        Float, comment="昨日涨停股今日上涨占比%"
+    )
+    # ---- EMA 平滑值（供阶段判定，削日间跳变）----
+    ema_ge2: Mapped[Optional[float]] = mapped_column(Float, comment="ge2的EMA")
+    ema_height: Mapped[Optional[float]] = mapped_column(Float, comment="height的EMA")
+    ema_advance: Mapped[Optional[float]] = mapped_column(Float, comment="晋级率的EMA")
+    # ---- 周期阶段 ----
+    phase_raw: Mapped[Optional[str]] = mapped_column(String(8), comment="当日原始判定")
+    phase: Mapped[Optional[str]] = mapped_column(
+        String(8), index=True, comment="2日确认后的稳定阶段"
+    )
+    stance: Mapped[Optional[str]] = mapped_column(String(16), comment="操作倾向")
+
+
+class LimitupStock(Base):
+    """每日涨停个股明细——连板梯队与题材聚集分析用。
+
+    东财的「所属行业」比证监会 83 个大类细得多（如「农化制品」「航海装备」），
+    是目前唯一能免费拿到的细分题材维度，可用于识别当日资金聚集方向。
+    """
+
+    __tablename__ = "limitup_stock"
+    __table_args__ = (
+        UniqueConstraint("trade_date", "code", name="uq_limitup_date_code"),
+    )
+
+    id: Mapped[int] = mapped_column(BigIntPK, primary_key=True, autoincrement=True)
+    trade_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    code: Mapped[str] = mapped_column(String(10), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(32), nullable=False, default="")
+    pct_chg: Mapped[Optional[float]] = mapped_column(Float)
+    close: Mapped[Optional[float]] = mapped_column(Price)
+    amount: Mapped[Optional[float]] = mapped_column(Money, comment="成交额(元)")
+    circ_mv: Mapped[Optional[float]] = mapped_column(Money, comment="流通市值(元)")
+    turnover: Mapped[Optional[float]] = mapped_column(Float, comment="换手率%")
+    # 封板资金：封单金额，越大说明封板越坚决
+    seal_amount: Mapped[Optional[float]] = mapped_column(Money, comment="封板资金(元)")
+    first_seal_time: Mapped[Optional[str]] = mapped_column(String(8), comment="首封时间")
+    last_seal_time: Mapped[Optional[str]] = mapped_column(String(8), comment="最后封板")
+    open_times: Mapped[int] = mapped_column(Integer, default=0, comment="炸板次数")
+    boards: Mapped[int] = mapped_column(Integer, default=1, index=True, comment="连板数")
+    industry: Mapped[Optional[str]] = mapped_column(
+        String(32), index=True, comment="东财细分行业(比证监会分类细)"
+    )

@@ -272,3 +272,83 @@ class LowvolStatsOut(BaseModel):
     win_rate5: Optional[float] = None      # T+5 收益为正的比例%
     by_first_board: Dict[str, float] = {}  # 首板/非首板 的平均T+5收益
     benchmark_hint: str = "回测基准：全市场 T+5 +0.379%；最优组合 T+5 +3.90% 超额+3.52pp"
+
+
+# ---------------- 市场情绪看板 ----------------
+class LadderTierOut(BaseModel):
+    """连板梯队的一档：N板有几只、都是谁。"""
+    boards: int                            # 连板数
+    count: int
+    codes: List[str] = []                  # 该档个股代码(最多10只)
+    names: List[str] = []
+
+
+class SentimentSnapshotOut(ORMModel):
+    """当日情绪快照——看板顶部总览。"""
+    trade_date: date
+    # 阶段与操作倾向
+    phase: Optional[str] = None            # 冰点/启动/主升/高潮/退潮/修复
+    phase_raw: Optional[str] = None        # 未经2日确认的原始判定
+    stance: Optional[str] = None           # 空仓观望/可以进场/...
+    # 核心计数
+    zt_count: int = 0
+    zb_count: int = 0
+    seal_rate: Optional[float] = None      # 封板率%,仅实时段(需盘中数据)有值
+    # 连板梯队
+    first_board: int = 0
+    ge2: int = 0
+    ge3: int = 0
+    ge5: int = 0
+    height: int = 0
+    tier_filled: int = 0
+    # 接力效应
+    advance_rate: Optional[float] = None   # 晋级率(最核心)
+    prev_zt_avg_pct: Optional[float] = None
+    prev_zt_win_rate: Optional[float] = None
+    strong_count: int = 0
+    # 该阶段的历史后续表现（实测，供看板给出参考而非仅显示标签）
+    phase_hist_ret5: Optional[float] = None      # 历史该阶段 T+5 全市场收益%
+    phase_hist_excess5: Optional[float] = None   # 相对全样本基准的超额
+    phase_hist_days: Optional[int] = None        # 历史样本天数
+    # 梯队明细
+    tiers: List[LadderTierOut] = []
+
+
+class SentimentTrendOut(BaseModel):
+    """情绪历史序列——画趋势图。"""
+    trade_date: date
+    zt_count: int = 0
+    zb_count: int = 0
+    seal_rate: Optional[float] = None
+    height: int = 0
+    ge2: int = 0
+    advance_rate: Optional[float] = None
+    phase: Optional[str] = None
+
+
+class IndustryHeatOut(BaseModel):
+    """行业热度——今日资金聚集方向。
+
+    热度分公式参考 tick-stock-panel：
+        0.35×涨停数 + 0.25×最高板 + 0.25×梯队档位数 + 0.15×二板宽度
+    注意：历史段行业是证监会大类(C39计算机…658只票)，粒度较粗；
+    真正的题材标签(人形机器人等)免费渠道拿不到。
+    """
+    industry: str
+    zt_count: int
+    max_boards: int
+    tier_count: int                        # 梯队档位数
+    ge2: int                               # 二板以上家数
+    heat: float                            # 热度分
+    codes: List[str] = []
+    names: List[str] = []
+
+
+class PhaseStatOut(BaseModel):
+    """各阶段的历史统计——看板可展示"当前阶段历史上意味着什么"。"""
+    phase: str
+    days: int
+    pct: float                             # 占历史比例%
+    avg_zt: Optional[float] = None
+    avg_height: Optional[float] = None
+    avg_advance: Optional[float] = None

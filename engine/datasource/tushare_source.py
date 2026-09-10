@@ -64,9 +64,15 @@ class TushareSource(DataSource):
         """一次拉全市场某交易日日线(不复权)。
 
         返回列(每行一只票): code, trade_date, raw_open, raw_high, raw_low,
-            raw_close, volume, amount, pct_chg, change_amt, amplitude。
-        复权字段(open/high/low/close)与 turnover 不在此输出，由上层留空入库。
+            raw_close, volume, amount, pct_chg, change_amt, amplitude, turnover。
+        复权字段(open/high/low/close)不在此输出，由上层留空入库。
         无数据(非交易日)返回空 DataFrame。
+
+        turnover(换手率) 来自另一个接口 daily_basic —— tushare 的 daily 不含
+        换手率。2026-06-15 切 tushare 时漏了这一步，导致换手率全空、
+        score_healthy_turnover 因子报废(该因子 IC(T+3)=+0.130，是实测最强的
+        正向因子之一)。daily_basic 与 daily 同属宽松限频池(50次/分钟)，
+        每个交易日多调一次即可。
         """
         td = trade_date.strftime("%Y%m%d")
         df = self.pro.daily(trade_date=td)
@@ -93,6 +99,21 @@ class TushareSource(DataSource):
         out["amplitude"] = (
             (df["high"] - df["low"]) / df["pre_close"] * 100
         ).round(3).values
+
+        # 换手率：daily_basic 单独取，按 ts_code 合并。取不到不影响主流程
+        # (行情照常入库，turnover 留空)，故整体 try 包住。
+        try:
+            basic = self.pro.daily_basic(
+                trade_date=td, fields="ts_code,turnover_rate"
+            )
+            if basic is not None and not basic.empty:
+                basic = basic.assign(
+                    code=basic["ts_code"].map(_ts_to_code),
+                    turnover=pd.to_numeric(basic["turnover_rate"], errors="coerce"),
+                )[["code", "turnover"]]
+                out = out.merge(basic, on="code", how="left")
+        except Exception as e:  # noqa: BLE001
+            log.warning("daily_basic 取换手率失败(%s)，turnover 留空", e)
         return out
 
     # ---------------- 行情：逐票(兼容抽象，历史补数等) ----------------
