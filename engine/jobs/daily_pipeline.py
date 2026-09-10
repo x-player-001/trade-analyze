@@ -20,6 +20,8 @@ from common.params import (
 from engine.datasource.pipeline import sync_daily_all
 from engine.datasource.tushare_source import TushareSource
 from engine.selection.selector import run_selection_multi
+from engine.jobs.watch_lowvol import detect_new_entries as detect_lowvol
+from engine.jobs.watch_lowvol import track_and_settle as settle_lowvol
 from engine.jobs.watch_pool import detect_new_entries, track_daily
 from engine.validation.validator import backfill_validations
 
@@ -73,9 +75,13 @@ def main() -> None:
     #    与选股完全独立(不同形态、不同验证口径)，失败不影响前三步已完成的工作。
     try:
         with session_scope() as s:
-            detect_new_entries(s, lookback_days=1)
+            detect_new_entries(s, lookback_days=1)      # 形态1:低位首板
         with session_scope() as s:
-            track_daily(s)
+            track_daily(s)                              # 首板池:结算涨停命中
+        with session_scope() as s:
+            detect_lowvol(s, lookback_days=1)           # 形态2:低位放量
+        with session_scope() as s:
+            settle_lowvol(s)                            # 放量池:结算T+N收益
     except Exception:
         log.exception("监控池更新失败")
 

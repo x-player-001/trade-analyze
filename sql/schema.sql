@@ -258,3 +258,56 @@ CREATE TABLE IF NOT EXISTS watch_pool_daily (
   KEY idx_wpd_code (code),
   KEY idx_wpd_date (trade_date)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='监控池每日量价跟踪';
+
+-- ============================ 低位放量池（独立表：标签=收益率）============================
+CREATE TABLE IF NOT EXISTS watch_lowvol (
+  id             BIGINT      NOT NULL AUTO_INCREMENT,
+  code           VARCHAR(10) NOT NULL,
+  name           VARCHAR(32) NOT NULL DEFAULT '',
+  board_group    VARCHAR(8)  NOT NULL DEFAULT 'main',
+  trigger_date   DATE        NOT NULL COMMENT '放量日',
+  trigger_close  DECIMAL(12,3) COMMENT '放量日原始收盘',
+  trigger_pct    FLOAT       COMMENT '放量日涨跌幅%',
+  trigger_amount DECIMAL(20,2) COMMENT '放量日成交额',
+  gain_from_low  FLOAT       NOT NULL COMMENT '距120日低点涨幅%(实测单调)',
+  vol_ratio      FLOAT       COMMENT '放量倍数(实测倒U型,2-3x最优)',
+  limit_up       TINYINT(1)  NOT NULL DEFAULT 0 COMMENT '触发日涨停(难买入)',
+  first_board    TINYINT(1)  NOT NULL DEFAULT 0 COMMENT '前60日无涨停',
+  entry_score    FLOAT       COMMENT '入池评分0~1',
+  entry_score_json TEXT      COMMENT '评分分项JSON',
+  ret1           FLOAT       COMMENT 'T+1收益%',
+  ret3           FLOAT       COMMENT 'T+3收益%',
+  ret5           FLOAT       COMMENT 'T+5收益%',
+  ret10          FLOAT       COMMENT 'T+10收益%',
+  excess5        FLOAT       COMMENT 'T+5相对全市场超额%',
+  max_ret10      FLOAT       COMMENT '10日内最高收益%',
+  max_dd10       FLOAT       COMMENT '10日内最大回撤%',
+  status         VARCHAR(12) NOT NULL DEFAULT 'watching' COMMENT 'watching/settled',
+  settle_date    DATE        COMMENT 'T+10对应日期',
+  created_at     DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at     DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_lowvol_code_trigger (code, trigger_date),
+  KEY idx_lowvol_code (code),
+  KEY idx_lowvol_trigger (trigger_date),
+  KEY idx_lowvol_status (status),
+  KEY idx_lowvol_score (entry_score),
+  KEY idx_lowvol_excess (excess5),
+  KEY idx_lowvol_fb (first_board)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='低位放量池(标签=T+N收益率)';
+
+CREATE TABLE IF NOT EXISTS watch_lowvol_daily (
+  id           BIGINT      NOT NULL AUTO_INCREMENT,
+  pool_id      BIGINT      NOT NULL,
+  code         VARCHAR(10) NOT NULL,
+  trade_date   DATE        NOT NULL,
+  days_since   INT         COMMENT '距触发日第N个交易日',
+  close        DECIMAL(12,3) COMMENT '原始收盘',
+  pct_chg      FLOAT,
+  ret_since    FLOAT       COMMENT '相对触发日收盘%',
+  amount_ratio FLOAT       COMMENT '额比vs触发日',
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_lvd_pool_date (pool_id, trade_date),
+  KEY idx_lvd_code (code),
+  KEY idx_lvd_date (trade_date)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='低位放量池每日跟踪';

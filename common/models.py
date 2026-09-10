@@ -11,8 +11,10 @@
 - validation_report  周度验证汇总
 - param_config       因子阈值参数版本
 - benchmark_sample   71条实盘标注样本（监督校准）
-- watch_pool         低位首板监控池（入池事件，只写不改）
-- watch_pool_daily   监控池每日量价跟踪
+- watch_pool         低位首板监控池（标签：30日内再次涨停）
+- watch_pool_daily   低位首板池每日量价跟踪
+- watch_lowvol       低位放量监控池（标签：T+N 收益率）
+- watch_lowvol_daily 低位放量池每日跟踪
 """
 from __future__ import annotations
 
@@ -316,12 +318,16 @@ class BenchmarkSample(Base, TimestampMixin):
 class WatchPool(Base, TimestampMixin):
     """低位首板监控池——一次入池事件一行，只写不改（同 pick_snapshot 的凭证原则）。
 
-    入池条件（engine/jobs/watch_pool.py）：低位 + 首板，只用决策时点已知信息。
-    首板后是否连板【不作为入池条件】——那是入池之后才发生的事，拿来筛选
-    等于用未来信息；改由 consec_boards/entry_type 记录，供事后分组统计
-    （历史：孤板 32.6% vs 连板 67.1% vs 随机基准 19.9%）。
-    入池后由 watch_pool_daily 逐日跟踪量价演化，不预判缩量/放量好坏——
-    两种形态在历史数据上表现相反（缩量15% vs 放量43%），交由数据判定。
+    入池条件（只用决策时点已知信息）：低位(距120日低点≤30%) + 首板(前60日无
+    涨停)，排除 ST。首板后是否连板【不作为入池条件】——那是入池之后才发生的
+    事，拿来筛选等于用未来信息；改由 consec_boards/entry_type 记录，供事后
+    分组统计（实测：孤板 32.6% vs 连板 67.1% vs 随机基准 19.9%）。
+
+    **观测标签：30个交易日内是否再次涨停**（实测公允命中率 39.05%）。
+    「低位放量」形态另有独立的 watch_lowvol 表——它的有效性建立在收益率
+    标签上而非涨停标签，两者观测目标不同，不可共表共用结算逻辑。
+
+    入池后由 watch_pool_daily 逐日跟踪量价演化，不预判后续缩量/放量好坏。
     """
 
     __tablename__ = "watch_pool"
@@ -409,3 +415,92 @@ class WatchPoolDaily(Base):
     # volume 字段在 2026-06-15 切 tushare 时单位由股变手(100倍断层)，跨该日不可比。
     amount_ratio: Mapped[Optional[float]] = mapped_column(Float, comment="额比vs首板日")
     is_limit_up: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+# ---------------------------------------------------------------------------
+# 低位放量监控池：与 watch_pool 独立，因为【观测标签不同】
+# ---------------------------------------------------------------------------
+class WatchLowvol(Base, TimestampMixin):
+    """低位放量监控池——入池事件，只写不改。
+
+    形态来源：「作手老严」规则回测（bt_yanrules → bt_lowvol，2023-01~2026-09，
+    5341票，n=19179）。他的完整条件链逐层恶化：
+        ① 超量单独                T+5 超额 -0.93
+        ② +低位                   T+5 超额 +1.03  ← 唯一有效层
+        ③ +地量 → ④ +反包 → ⑤ +缩量回踩(他的核心买点)  -1.11 → -1.67 → -3.42
+    故只取②：**低位(≤15%) + 放量(超前60日最大量)**，后面的条件全部丢弃。
+
+    **观测标签：T+1/3/5/10 收益率与对市场基准的超额**——这是回测验证有效的
+    口径（最优组合 T+5 +3.90%、T+10 +6.24%、超额 +3.52pp、胜率 63.0%）。
+
+    【为什么不与 watch_pool 共表】曾把两形态塞进同一张表用 pattern 区分，
+    结果被迫共用「30日内再次涨停」标签，lowvol 命中率仅 17.97%（低于随机
+    基准 19.87%），评分也失去区分度。不是形态无效，是标签错配——
+    低位放量的票能稳步上涨但不易涨停。共表会逼着共用结算逻辑，故拆开。
+    """
+
+    __tablename__ = "watch_lowvol"
+    __table_args__ = (
+        UniqueConstraint("code", "trigger_date", name="uq_lowvol_code_trigger"),
+    )
+
+    id: Mapped[int] = mapped_column(BigIntPK, primary_key=True, autoincrement=True)
+    code: Mapped[str] = mapped_column(String(10), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(32), nullable=False, default="")
+    board_group: Mapped[str] = mapped_column(String(8), nullable=False, default="main")
+    # 放量日（触发入池）
+    trigger_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    trigger_close: Mapped[float] = mapped_column(Price, comment="放量日原始收盘")
+    trigger_pct: Mapped[Optional[float]] = mapped_column(Float, comment="放量日涨跌幅%")
+    trigger_amount: Mapped[Optional[float]] = mapped_column(Money, comment="放量日成交额")
+
+    # ---- 入池因子（只用触发日及之前信息，无未来函数）----
+    # 距120日最低收盘涨幅%。实测单调：<3% T+5+3.36% → 12-15% +0.72%
+    gain_from_low: Mapped[float] = mapped_column(Float, comment="距120日低点涨幅%")
+    # 放量倍数(vs前20日均量)。实测倒U型：2-3x +3.19% 最优，>8x -1.78%
+    vol_ratio: Mapped[Optional[float]] = mapped_column(Float, comment="放量倍数")
+    # 触发日是否涨停。实测涨停仅占2.4%且超额与非涨停几乎相同(+1.63 vs +1.58)，
+    # 故不参与评分，仅作可成交性标记（涨停当日难买入）。
+    limit_up: Mapped[bool] = mapped_column(Boolean, default=False)
+    # 是否首板(前60日无涨停)。实测 首板+2.10% vs 非首板-0.64%，差2.74pp
+    first_board: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    entry_score: Mapped[Optional[float]] = mapped_column(
+        Float, index=True, comment="入池评分0~1"
+    )
+    entry_score_json: Mapped[Optional[str]] = mapped_column(Text, comment="评分分项JSON")
+
+    # ---- 收益结算（标签）----
+    # 相对触发日收盘的累计收益%，用 pct_chg 连乘（除权安全）
+    ret1: Mapped[Optional[float]] = mapped_column(Float, comment="T+1收益%")
+    ret3: Mapped[Optional[float]] = mapped_column(Float, comment="T+3收益%")
+    ret5: Mapped[Optional[float]] = mapped_column(Float, comment="T+5收益%")
+    ret10: Mapped[Optional[float]] = mapped_column(Float, comment="T+10收益%")
+    # T+5 相对全市场同期平均的超额（正=跑赢大盘）
+    excess5: Mapped[Optional[float]] = mapped_column(Float, index=True, comment="T+5超额%")
+    max_ret10: Mapped[Optional[float]] = mapped_column(Float, comment="10日内最高收益%")
+    max_dd10: Mapped[Optional[float]] = mapped_column(Float, comment="10日内最大回撤%")
+    # watching=跟踪中 / settled=T+10 已结算
+    status: Mapped[str] = mapped_column(
+        String(12), nullable=False, default="watching", index=True
+    )
+    settle_date: Mapped[Optional[date]] = mapped_column(Date, comment="T+10对应日期")
+
+
+class WatchLowvolDaily(Base):
+    """低位放量池每日跟踪——入池后每交易日一行。"""
+
+    __tablename__ = "watch_lowvol_daily"
+    __table_args__ = (
+        UniqueConstraint("pool_id", "trade_date", name="uq_lvd_pool_date"),
+    )
+
+    id: Mapped[int] = mapped_column(BigIntPK, primary_key=True, autoincrement=True)
+    pool_id: Mapped[int] = mapped_column(BigIntPK, nullable=False, index=True)
+    code: Mapped[str] = mapped_column(String(10), nullable=False, index=True)
+    trade_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    days_since: Mapped[int] = mapped_column(Integer, comment="距触发日第N个交易日")
+    close: Mapped[Optional[float]] = mapped_column(Price, comment="原始收盘")
+    pct_chg: Mapped[Optional[float]] = mapped_column(Float)
+    ret_since: Mapped[Optional[float]] = mapped_column(Float, comment="相对触发日收盘%")
+    # 成交额比（用 amount 而非 volume：后者2026-06-15有100倍单位断层）
+    amount_ratio: Mapped[Optional[float]] = mapped_column(Float, comment="额比vs触发日")

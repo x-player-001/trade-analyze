@@ -1,7 +1,7 @@
-"""低位首板监控池查询接口。
+"""低位首板监控池查询接口（标签=30日内再次涨停）。
 
 池由 `python -m engine.jobs.watch_pool` 每日盘后维护，本接口只读。
-形态与基准说明见 engine/jobs/watch_pool.py 模块注释。
+低位放量池是另一套（标签=收益率），见 api/routers/lowvol.py。
 """
 from __future__ import annotations
 
@@ -91,7 +91,7 @@ def watch_list(
 
 @router.get("/stats", response_model=WatchPoolStatsOut, summary="监控池命中率统计")
 def watch_stats(
-    since: date | None = Query(None, description="只统计首板日 >= 该日期的"),
+    since: date | None = Query(None, description="只统计触发日 >= 该日期的"),
     session: Session = Depends(get_session),
 ) -> WatchPoolStatsOut:
     stmt = select(WatchPool.status, func.count()).group_by(WatchPool.status)
@@ -136,7 +136,7 @@ def watch_stats(
 @router.get("/{code}", response_model=WatchPoolOut, summary="池内个股详情(含每日跟踪)")
 def watch_detail(
     code: str,
-    trigger_date: date | None = Query(None, description="同一票多次入池时指定首板日"),
+    trigger_date: date | None = Query(None, description="同一票多次入池时指定触发日"),
     session: Session = Depends(get_session),
 ) -> WatchPoolOut:
     stmt = select(WatchPool).where(WatchPool.code == code)
