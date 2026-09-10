@@ -294,3 +294,90 @@ def test_kline_adjust_none(client, session):
 def test_kline_404(client, session):
     r = client.get("/api/quotes/999999/kline")
     assert r.status_code == 404
+
+
+def _seed_kline_no_hfq(session):
+    """模拟 2026-06-15 后 tushare 数据:复权列全空,只有 raw_*。"""
+    session.add(StockBasic(code="600002", name="无复权股", board="main",
+                           price_limit_pct=10.0, is_st=False, is_active=True))
+    closes = [10.0, 10.2, 10.1, 10.3, 10.5]
+    rows = make_quotes("600002", date(2026, 7, 1), closes)
+    for r in rows:
+        for f in ("open", "high", "low", "close"):
+            r[f] = None          # 复权列留空,与线上 tushare 数据一致
+    bulk_upsert(session, DailyQuote, rows)
+    session.commit()
+    return rows
+
+
+def test_kline_no_hfq_falls_back_to_raw(client, session):
+    """回归:复权列全空时不能 500,应回退原始价并标注实际口径。
+
+    曾有 bug:KlineBar 的 open/high/low/close 声明为必填 float,而
+    2026-06-15 切 tushare 后这些列全是 NULL,导致 pydantic 校验失败,
+    整个K线接口 500——两种 adjust 都挂。
+    """
+    _seed_kline_no_hfq(session)
+    r = client.get("/api/quotes/600002/kline", params={"adjust": "hfq"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["adjust"] == "none(hfq unavailable)"   # 告知前端已回退
+    bars = body["bars"]
+    assert len(bars) == 5
+    # 回退后 OHLC 用原始价填充,不是 null
+    assert all(b["close"] is not None for b in bars)
+    assert bars[0]["close"] == bars[0]["raw_close"]
+
+
+def test_kline_no_hfq_adjust_none_ok(client, session):
+    _seed_kline_no_hfq(session)
+    r = client.get("/api/quotes/600002/kline", params={"adjust": "none"})
+    assert r.status_code == 200
+    assert r.json()["adjust"] == "none"
+    assert all(b["close"] is not None for b in r.json()["bars"])
+
+
+def test_kline_with_hfq_keeps_hfq(client, session):
+    """对照:有复权数据时 adjust=hfq 正常,不回退。"""
+    _seed_kline(session)
+    r = client.get("/api/quotes/600001/kline", params={"adjust": "hfq"})
+    assert r.status_code == 200
+    assert r.json()["adjust"] == "hfq"
+
+
+def test_kline_volume_uses_normalized_column(client, session):
+    """K线返回的 volume 必须是归一化值(volume_std)，不是有断层的原始列。
+
+    原始 volume 在 2026-06-15 切 tushare 时单位由「股」变「手」(100倍)，
+    直接返回会让前端量柱跨该日出现假断崖。
+    """
+    session.add(StockBasic(code="600003", name="量测股", board="main",
+                           price_limit_pct=10.0, is_st=False, is_active=True))
+    rows = make_quotes("600003", date(2026, 6, 10), [10.0, 10.1, 10.2])
+    for r in rows:
+        r["volume"] = 2000000.0        # 原始(股)
+        r["volume_std"] = 20000.0      # 归一化(手)
+    bulk_upsert(session, DailyQuote, rows)
+    session.commit()
+
+    r = client.get("/api/quotes/600003/kline")
+    assert r.status_code == 200
+    bars = r.json()["bars"]
+    assert all(b["volume"] == 20000.0 for b in bars)       # 归一化值
+    assert all(b["volume_raw"] == 2000000.0 for b in bars)  # 原值另存
+
+
+def test_kline_volume_falls_back_when_std_missing(client, session):
+    """volume_std 为空(停牌日等)时回退原值，不返回 null。"""
+    session.add(StockBasic(code="600004", name="回退股", board="main",
+                           price_limit_pct=10.0, is_st=False, is_active=True))
+    rows = make_quotes("600004", date(2026, 6, 10), [10.0, 10.1])
+    for r in rows:
+        r["volume"] = 12345.0
+        r["volume_std"] = None
+    bulk_upsert(session, DailyQuote, rows)
+    session.commit()
+
+    r = client.get("/api/quotes/600004/kline")
+    assert r.status_code == 200
+    assert all(b["volume"] == 12345.0 for b in r.json()["bars"])

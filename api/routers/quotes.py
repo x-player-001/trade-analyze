@@ -26,8 +26,10 @@ def kline(
 ) -> KlineOut:
     """返回某股日线 OHLCV。
 
-    - 默认后复权(adjust=hfq):与选股因子同口径,形态连续,适合技术分析。
-    - adjust=none:用 raw_close 作为收盘的原始价(仅 close 有原始值,OHLC 其余仍为后复权基准)。
+    - adjust=hfq(默认):后复权,与选股因子同口径。**但 2026-06-15 切 tushare 后
+      不再落复权价**,该区间无复权数据时自动回退原始价,响应 adjust 字段会标
+      "none(hfq unavailable)"，前端据此提示口径。
+    - adjust=none:原始价(未复权,真实成交价),与 akshare 源零误差。
     - marks:区间内该股被选中的日期,前端可在K线图上标买点。
     """
     basic = session.get(StockBasic, code)
@@ -49,10 +51,21 @@ def kline(
     if not rows:
         raise HTTPException(404, f"无 {code} 的行情数据")
 
+    # 后复权列在 2026-06-15 切 tushare 之后为空(第一版不做复权)。若请求 hfq
+    # 但区间内复权数据缺失,自动回退到原始价——否则整段返回 null,前端画不出图。
+    hfq_available = any(r.close is not None for r in rows)
+    effective = adjust if (adjust == "none" or hfq_available) else "none(hfq unavailable)"
+    use_raw = effective != "hfq"
+
     bars = []
     for r in rows:
         bar = KlineBar.model_validate(r)
-        if adjust == "none" and r.raw_close is not None:
+        # 成交量返回归一化值(「手」)。原始 volume 列 2026-06-15 起单位由股变手,
+        # 直接返回会让量柱在该日断崖。volume_std 缺失时(停牌日 volume 本就为空)
+        # 回退原值，并把入库原值放在 volume_raw 供核对。
+        bar.volume_raw = r.volume
+        bar.volume = r.volume_std if r.volume_std is not None else r.volume
+        if use_raw and r.raw_close is not None:
             # 原始价模式:直接用库内存的原始 OHLC(与 akshare 源零误差)。
             bar.open = r.raw_open if r.raw_open is not None else r.open
             bar.high = r.raw_high if r.raw_high is not None else r.high
@@ -79,7 +92,7 @@ def kline(
     return KlineOut(
         code=code,
         name=basic.name if basic else None,
-        adjust=adjust,
+        adjust=effective,
         bars=bars,
         marks=marks,
     )

@@ -125,17 +125,25 @@ class ParamVersionOut(ORMModel):
 
 # ---------------- K线 ----------------
 class KlineBar(ORMModel):
-    """单根K线。默认 OHLC 后复权(与选股因子一致),raw_* 为原始价(真实成交价)。"""
+    """单根K线。OHLC 按请求的 adjust 口径填充,raw_* 恒为原始价(真实成交价)。
+
+    OHLC 可空:后复权列在 2026-06-15 切 tushare 后的数据上为 NULL
+    (第一版不做复权)。此时 adjust=hfq 会自动回退到原始价,响应里的
+    adjust 字段会标成 "none(hfq unavailable)" 告知前端实际口径。
+    """
     trade_date: date
-    open: float
-    high: float
-    low: float
-    close: float
+    open: Optional[float] = None
+    high: Optional[float] = None
+    low: Optional[float] = None
+    close: Optional[float] = None
     raw_open: Optional[float] = None
     raw_high: Optional[float] = None
     raw_low: Optional[float] = None
     raw_close: Optional[float] = None
+    # 成交量统一为「手」：取 volume_std(归一化列)。原始 volume 列在
+    # 2026-06-15 切 tushare 时单位由股变手,直接返回会让K线量柱跨该日断崖。
     volume: Optional[float] = None
+    volume_raw: Optional[float] = None   # 原始入库值(单位有断层,仅供核对)
     amount: Optional[float] = None
     amplitude: Optional[float] = None
     pct_chg: Optional[float] = None
@@ -154,7 +162,8 @@ class KlineMark(BaseModel):
 class KlineOut(BaseModel):
     code: str
     name: Optional[str] = None
-    adjust: str               # hfq=后复权 / none=不复权
+    # 实际生效口径:hfq / none / "none(hfq unavailable)"=请求hfq但库内无复权数据已回退
+    adjust: str
     bars: List[KlineBar]
     marks: List[KlineMark]    # 区间内该股被选中的日期(画买点标记用)
 
@@ -209,6 +218,57 @@ class WatchPoolStatsOut(BaseModel):
     expired: int
     hit_rate: Optional[float] = None       # hit/(hit+expired) %
     avg_hit_days: Optional[float] = None
-    # 按形态分组的命中率(solo=孤板 / consecutive=连板)
+    # 按 entry_type 分组的命中率(solo=孤板 / consecutive=连板)
     by_entry_type: Dict[str, float] = {}
     benchmark_hint: str = "历史基准：孤板 32.63% / 连板 67.08% / 随机 19.87%"
+
+
+# ---------------- 低位放量池（独立表，标签=收益率） ----------------
+class LowvolTrackOut(BaseModel):
+    trade_date: date
+    days_since: int
+    close: Optional[float] = None
+    pct_chg: Optional[float] = None
+    ret_since: Optional[float] = None       # 相对触发日收盘%
+    amount_ratio: Optional[float] = None
+
+
+class LowvolOut(ORMModel):
+    """低位放量入池记录。标签是 T+N 收益率，不是"是否涨停"。"""
+    id: int
+    code: str
+    name: str
+    board_group: str
+    trigger_date: date            # 放量日
+    trigger_close: Optional[float] = None
+    trigger_pct: Optional[float] = None
+    gain_from_low: float          # 距120日低点涨幅%(越小越低位,实测单调)
+    vol_ratio: Optional[float] = None   # 放量倍数(实测倒U型,2-3x最优)
+    limit_up: bool = False        # 触发日涨停(难买入,仅标记不计分)
+    first_board: bool = False     # 前60日无涨停(实测差2.74pp)
+    entry_score: Optional[float] = None
+    entry_scores: Dict[str, float] = {}
+    # 收益结算
+    ret1: Optional[float] = None
+    ret3: Optional[float] = None
+    ret5: Optional[float] = None
+    ret10: Optional[float] = None
+    excess5: Optional[float] = None     # T+5 相对全市场超额%
+    max_ret10: Optional[float] = None
+    max_dd10: Optional[float] = None
+    status: str                   # watching / settled
+    settle_date: Optional[date] = None
+    track: List[LowvolTrackOut] = []
+
+
+class LowvolStatsOut(BaseModel):
+    """低位放量池收益统计(仅已结算样本)。"""
+    total: int
+    watching: int
+    settled: int
+    avg_ret5: Optional[float] = None
+    avg_ret10: Optional[float] = None
+    avg_excess5: Optional[float] = None    # 平均超额,>0 才说明有 edge
+    win_rate5: Optional[float] = None      # T+5 收益为正的比例%
+    by_first_board: Dict[str, float] = {}  # 首板/非首板 的平均T+5收益
+    benchmark_hint: str = "回测基准：全市场 T+5 +0.379%；最优组合 T+5 +3.90% 超额+3.52pp"
