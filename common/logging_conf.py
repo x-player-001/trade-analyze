@@ -7,14 +7,17 @@ from pathlib import Path
 
 from common.config import settings
 
-_configured = False
-
-
 def setup_logging(name: str = "trade-analyze") -> logging.Logger:
-    """初始化根日志：控制台 + 文件。重复调用安全。"""
-    global _configured
+    """初始化日志：控制台 + 文件。重复调用安全。
+
+    注意：按 name 判断是否已配置，不能用全局标志——一个 job 导入另一个 job
+    时（如 build_ladder_history 导入 watch_pool 取 limit_threshold），
+    被导入方会先调用本函数，全局标志一旦置位，后续调用就返回**没有任何
+    handler 的 logger**，日志全部静默丢失（曾导致脚本"跑完无输出"，
+    误判为进程被杀）。
+    """
     logger = logging.getLogger(name)
-    if _configured:
+    if logger.handlers:          # 该 name 已配置过
         return logger
 
     level = getattr(logging, settings.log_level.upper(), logging.INFO)
@@ -35,7 +38,6 @@ def setup_logging(name: str = "trade-analyze") -> logging.Logger:
     logger.addHandler(fh)
 
     logger.propagate = False
-    _configured = True
     return logger
 
 
