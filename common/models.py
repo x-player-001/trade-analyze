@@ -16,7 +16,11 @@
 - watch_lowvol       低位放量监控池（标签：T+N 收益率）
 - watch_lowvol_daily 低位放量池每日跟踪
 - market_sentiment   每日市场情绪温度（涨停/炸板/连板高度）
-- limitup_stock      每日涨停个股明细（含连板数、行业、封板资金）
+- limitup_stock      每日涨停个股明细（含连板数、行业、封板资金、题材串）
+- concept_daily      每日概念板块快照（390个，只能自存：无历史接口）
+- theme_daily        每日题材热度（涨停原因聚合，含连续上榜天数）
+- adj_factor         复权因子（由除权除息事件流累乘算出）
+- stock_concept      个股↔同花顺概念映射（遍历板块成分股反建）
 """
 from __future__ import annotations
 
@@ -538,6 +542,13 @@ class MarketSentiment(Base, TimestampMixin):
         Float, comment="封板率%=涨停/(涨停+炸板)"
     )
     strong_count: Mapped[int] = mapped_column(Integer, default=0, comment="强势股家数")
+    # 跌停家数与涨跌停比。情绪原本只有涨停/炸板，缺这一半——涨跌停比是
+    # 情绪强弱的经典指标，且「冰点」用跌停家数判定比用涨停贴地更直接。
+    # 仅同花顺源可得（日线算不出盘中是否触及跌停板）。
+    dt_count: Mapped[int] = mapped_column(Integer, default=0, comment="跌停家数")
+    zt_dt_ratio: Mapped[Optional[float]] = mapped_column(
+        Float, comment="涨跌停比=涨停/跌停"
+    )
     # ---- 连板梯队 ----
     first_board: Mapped[int] = mapped_column(Integer, default=0, comment="首板家数")
     ge2: Mapped[int] = mapped_column(Integer, default=0, comment="2板以上家数")
@@ -596,6 +607,140 @@ class LimitupStock(Base):
     last_seal_time: Mapped[Optional[str]] = mapped_column(String(8), comment="最后封板")
     open_times: Mapped[int] = mapped_column(Integer, default=0, comment="炸板次数")
     boards: Mapped[int] = mapped_column(Integer, default=1, index=True, comment="连板数")
+    # 涨停原因(同花顺)：`+` 连接的题材串，如 "800G光引擎+CPO+AI算力"。
+    # 这是目前唯一能拿到的真正题材维度——东财/同花顺爬虫接口与 tushare
+    # 免费档均取不到概念数据。拆分聚合即得当日主线，见 theme_daily。
+    limit_up_reason: Mapped[Optional[str]] = mapped_column(
+        String(255), comment="涨停原因(题材串)"
+    )
     industry: Mapped[Optional[str]] = mapped_column(
         String(32), index=True, comment="东财细分行业(比证监会分类细)"
     )
+
+
+# ---------------------------------------------------------------------------
+# 热点每日快照：盘中看板走实时接口，这里只负责积累历史
+# ---------------------------------------------------------------------------
+class ConceptDaily(Base):
+    """每日概念板块快照（同花顺 390 个概念）。
+
+    **必须自己每天存**：同花顺只提供板块的**当前**行情快照，历史行情要
+    逐个板块查（390 次请求/天，不现实）。不存就永远补不回来——
+    akshare 涨停池只留 30 天的教训已经吃过一次。
+
+    存下来才能回答：某板块是刚启动还是已涨了两周？资金是持续流入还是一日游？
+    """
+
+    __tablename__ = "concept_daily"
+    __table_args__ = (
+        UniqueConstraint("trade_date", "thscode", name="uq_concept_date_code"),
+    )
+
+    id: Mapped[int] = mapped_column(BigIntPK, primary_key=True, autoincrement=True)
+    trade_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    thscode: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(48), nullable=False, default="")
+    last_price: Mapped[Optional[float]] = mapped_column(Float, comment="板块指数点位")
+    pct_chg: Mapped[Optional[float]] = mapped_column(Float, index=True, comment="涨跌幅%")
+    turnover: Mapped[Optional[float]] = mapped_column(Money, comment="成交额(元)")
+    volume: Mapped[Optional[float]] = mapped_column(Money)
+    # 当日该板块内涨停家数（由 limitup_stock 关联算出，可空）
+    zt_count: Mapped[Optional[int]] = mapped_column(Integer, comment="板块内涨停数")
+    # 成交额占全市场概念板块之和的比例%——比绝对涨幅更能反映资金聚集
+    turnover_share: Mapped[Optional[float]] = mapped_column(
+        Float, comment="成交额占比%"
+    )
+    rank_pct: Mapped[Optional[int]] = mapped_column(Integer, comment="当日涨幅排名")
+
+
+class ThemeDaily(Base):
+    """每日题材热度——当日全部涨停股的 limit_up_reason 拆解后词频聚合。
+
+    出现次数最多的标签即当日主线。`consec_days` 连续上榜天数是区分
+    **持续主线**与**一日游热点**的关键——只看单日词频区分不了。
+    """
+
+    __tablename__ = "theme_daily"
+    __table_args__ = (
+        UniqueConstraint("trade_date", "theme", name="uq_theme_date"),
+    )
+
+    id: Mapped[int] = mapped_column(BigIntPK, primary_key=True, autoincrement=True)
+    trade_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    theme: Mapped[str] = mapped_column(String(48), nullable=False, index=True)
+    zt_count: Mapped[int] = mapped_column(Integer, default=0, comment="挂此题材的涨停数")
+    max_boards: Mapped[int] = mapped_column(Integer, default=0, comment="该题材最高连板")
+    codes: Mapped[Optional[str]] = mapped_column(Text, comment="涨停个股代码,逗号分隔")
+    names: Mapped[Optional[str]] = mapped_column(Text, comment="涨停个股名称,逗号分隔")
+    # 连续上榜天数：≥3 说明是持续主线，=1 多为一日游
+    consec_days: Mapped[int] = mapped_column(
+        Integer, default=1, index=True, comment="连续上榜天数"
+    )
+    is_new: Mapped[bool] = mapped_column(
+        Boolean, default=False, index=True, comment="近20日首次出现"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 复权因子 & 概念映射（同花顺源）
+# ---------------------------------------------------------------------------
+class AdjFactor(Base):
+    """后复权因子。由同花顺除权除息事件流（分红/送股/配股）累乘算出。
+
+    **为什么需要**：库内 open/high/low/close 复权列自 2026-06-15 切 tushare 后
+    全空（tushare 的 adj_factor 限频 1次/小时，逐票复权不可行），导致：
+      · K线接口 adjust=hfq 一直降级回退到原始价
+      · 用 raw_close 算 N 日低点在除权股上失真（曾见 gain_from_low = -28.94%，
+        即"收盘价低于过去120日最低价"，逻辑上不可能）
+
+    **算法**（后复权，前视口径）：除权日价格跳空比例
+        ratio = (前收 - 每股分红 + 配股比例×配股价) /
+                (前收 × (1 + 每股送转 + 配股比例))
+    factor 为该日及之后所有交易日的累乘调整系数，后复权价 = 原始价 × factor。
+    以最新日为基准 1.0 向前累乘，故历史价被抬高、最新价不变——这样新增
+    除权事件不会改变历史因子（前复权则每次除权都要重算全历史）。
+    """
+
+    __tablename__ = "adj_factor"
+    __table_args__ = (
+        UniqueConstraint("code", "trade_date", name="uq_adj_code_date"),
+    )
+
+    id: Mapped[int] = mapped_column(BigIntPK, primary_key=True, autoincrement=True)
+    code: Mapped[str] = mapped_column(String(10), nullable=False, index=True)
+    trade_date: Mapped[date] = mapped_column(Date, nullable=False, index=True,
+                                             comment="除权日(ex_date)")
+    dividend: Mapped[float] = mapped_column(Float, default=0.0, comment="每股分红(元)")
+    bonus: Mapped[float] = mapped_column(Float, default=0.0, comment="每股送转(股)")
+    allot_ratio: Mapped[float] = mapped_column(Float, default=0.0, comment="配股比例")
+    allot_price: Mapped[float] = mapped_column(Float, default=0.0, comment="配股价")
+    # 单次除权的价格调整比例（当日价 / 前一日价 的理论比值）
+    ratio: Mapped[float] = mapped_column(Float, default=1.0, comment="单次除权比例")
+    # 后复权累乘因子：hfq_price = raw_price * factor
+    factor: Mapped[float] = mapped_column(Float, default=1.0, comment="后复权累乘因子")
+
+
+class StockConcept(Base, TimestampMixin):
+    """个股 ↔ 同花顺概念板块映射。
+
+    **为什么要自建**：同花顺的「个股反查所属指数」接口尚未上线
+    （docs 标注"敬请期待"，实测 404）。改用反向路径——遍历 390 个概念板块
+    取成分股，反建映射。390次请求约10分钟，板块成分变动慢，一周跑一次即可。
+
+    **比证监会分类强在哪**：一只票可同时属于多个概念（人形机器人+减速器+
+    工业母机），而 stock_basic.industry 只有一个证监会大类（C39 含658只票）。
+    概念维度才是 A 股主线的真实载体。
+    """
+
+    __tablename__ = "stock_concept"
+    __table_args__ = (
+        UniqueConstraint("code", "thscode", name="uq_sc_code_concept"),
+    )
+
+    id: Mapped[int] = mapped_column(BigIntPK, primary_key=True, autoincrement=True)
+    code: Mapped[str] = mapped_column(String(10), nullable=False, index=True)
+    thscode: Mapped[str] = mapped_column(String(16), nullable=False, index=True,
+                                         comment="概念板块代码")
+    concept_name: Mapped[str] = mapped_column(String(48), nullable=False, default="",
+                                              index=True, comment="概念名称")
+    stock_name: Mapped[Optional[str]] = mapped_column(String(32))

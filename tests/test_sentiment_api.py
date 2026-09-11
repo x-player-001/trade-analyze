@@ -44,6 +44,13 @@ def _seed(session):
     session.commit()
 
 
+def test_today_is_last_closed_day_not_realtime(client, session):
+    """/today 读库,给的是最近已收盘日——盘中实时看 /api/hotspot/sentiment。"""
+    _seed(session)
+    b = client.get("/api/sentiment/today").json()
+    assert b["trade_date"] == "2026-09-09"     # 库内最新,非"今天"
+
+
 def test_today_snapshot(client, session):
     _seed(session)
     r = client.get("/api/sentiment/today")
@@ -73,22 +80,6 @@ def test_trend_ascending(client, session):
     assert len(rows) == 2
     # 返回按日期升序，便于前端直接画图
     assert rows[0]["trade_date"] < rows[1]["trade_date"]
-
-
-def test_industry_heat_ranking_and_min_zt(client, session):
-    _seed(session)
-    r = client.get("/api/sentiment/industry", params={"min_zt": 3})
-    assert r.status_code == 200
-    rows = r.json()
-    # 航海装备只有2只涨停 < min_zt=3，应被过滤
-    assert [x["industry"] for x in rows] == ["农化制品"]
-    top = rows[0]
-    assert top["zt_count"] == 3 and top["max_boards"] == 5
-    assert top["ge2"] == 3
-    assert top["heat"] > 0
-    # min_zt 放宽后两个行业都出现
-    r2 = client.get("/api/sentiment/industry", params={"min_zt": 1})
-    assert len(r2.json()) == 2
 
 
 def test_phase_stats(client, session):

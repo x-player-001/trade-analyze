@@ -1,4 +1,8 @@
-"""市场情绪看板接口（只读）。
+"""市场情绪历史接口（只读，日频）。
+
+**这组接口读库，给的是已收盘交易日的数据**，盘中不会变。
+盘中实时阶段判定见 `api/routers/hotspot.py:/api/hotspot/sentiment`。
+分工：本组看**历史趋势与阶段统计**，热点组看**当下**。
 
 数据由 engine/jobs/fetch_sentiment.py（实时段，含封板率/东财行业）与
 engine/jobs/build_ladder_history.py（历史段，日线自建）共同维护。
@@ -20,7 +24,6 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select
 
 from api.schemas.responses import (
-    IndustryHeatOut,
     LadderTierOut,
     PhaseStatOut,
     SentimentSnapshotOut,
@@ -48,11 +51,17 @@ def _latest_date(session: Session) -> date | None:
     return session.scalar(select(func.max(MarketSentiment.trade_date)))
 
 
-@router.get("/today", response_model=SentimentSnapshotOut, summary="当日情绪快照")
+@router.get("/today", response_model=SentimentSnapshotOut,
+            summary="最近收盘日情绪快照(非盘中实时)")
 def today(
     trade_date: date | None = Query(None, alias="date", description="默认最新一天"),
     session: Session = Depends(get_session),
 ) -> SentimentSnapshotOut:
+    """**读库，给出的是最近一个已收盘交易日的情绪**，不是盘中实时。
+
+    盘中要看当下阶段请用 `/api/hotspot/sentiment`——那个用实时涨停/跌停
+    现算，60秒刷新。本接口的定位是历史序列的最后一天，适合收盘后复盘。
+    """
     if trade_date is None:
         trade_date = _latest_date(session)
     if trade_date is None:
@@ -95,47 +104,6 @@ def trend(
     ).all()
     return [SentimentTrendOut.model_validate(r, from_attributes=True)
             for r in reversed(rows)]
-
-
-@router.get("/industry", response_model=list[IndustryHeatOut], summary="行业热度榜")
-def industry_heat(
-    trade_date: date | None = Query(None, alias="date"),
-    min_zt: int = Query(3, ge=1, description="该行业当日涨停少于此数不参与排名"),
-    limit: int = Query(20, ge=1, le=100),
-    session: Session = Depends(get_session),
-) -> list[IndustryHeatOut]:
-    if trade_date is None:
-        trade_date = _latest_date(session)
-    if trade_date is None:
-        return []
-    agg: dict[str, list] = {}
-    for code, name, b, ind in session.execute(
-        select(LimitupStock.code, LimitupStock.name,
-               LimitupStock.boards, LimitupStock.industry)
-        .where(LimitupStock.trade_date == trade_date,
-               LimitupStock.industry.isnot(None))
-    ).all():
-        agg.setdefault(ind, []).append((code, name or "", int(b)))
-
-    out: list[IndustryHeatOut] = []
-    for ind, items in agg.items():
-        if len(items) < min_zt:
-            continue
-        bs = [b for _, _, b in items]
-        tiers = {b for b in bs if b >= 2}
-        # 热度分：涨停数 + 最高板 + 梯队档位 + 二板宽度 加权
-        heat = (0.35 * len(items) + 0.25 * max(bs)
-                + 0.25 * len(tiers) + 0.15 * sum(1 for b in bs if b >= 2))
-        items.sort(key=lambda x: -x[2])
-        out.append(IndustryHeatOut(
-            industry=ind, zt_count=len(items), max_boards=max(bs),
-            tier_count=len(tiers), ge2=sum(1 for b in bs if b >= 2),
-            heat=round(heat, 2),
-            codes=[c for c, _, _ in items[:10]],
-            names=[n for _, n, _ in items[:10]],
-        ))
-    out.sort(key=lambda x: -x.heat)
-    return out[:limit]
 
 
 @router.get("/phases", response_model=list[PhaseStatOut], summary="各阶段历史统计")

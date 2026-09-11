@@ -103,6 +103,14 @@ def fetch_raw_day(trade_date: date) -> tuple[dict, list[dict]]:
                 industry=str(d.get("所属行业", ""))[:32] or None,
             ))
 
+    # 跌停家数：akshare 无此池，用同花顺补（日线也算不出盘中是否触板）
+    dt_n = 0
+    try:
+        from engine.datasource.hithink_source import HithinkSource
+        dt_n = len(HithinkSource().limit_down_pool(trade_date.isoformat()))
+    except Exception as e:  # noqa: BLE001
+        log.warning("%s 跌停池取失败(不影响其他指标): %s", trade_date, str(e)[:60])
+
     zt_n, zb_n = len(zt), len(zb)
     seal = round(zt_n / (zt_n + zb_n) * 100, 2) if (zt_n + zb_n) else None
     prev_avg = prev_win = None
@@ -118,6 +126,9 @@ def fetch_raw_day(trade_date: date) -> tuple[dict, list[dict]]:
     counts = dict(
         trade_date=trade_date,
         zt_count=zt_n, zb_count=zb_n, seal_rate=seal, strong_count=len(strong),
+        dt_count=dt_n,
+        # 涨跌停比：情绪强弱的经典指标。跌停为0时记 None 而非除零
+        zt_dt_ratio=round(zt_n / dt_n, 3) if dt_n else None,
         first_board=int((bs == 1).sum()) if len(bs) else 0,
         ge2=int((bs >= 2).sum()) if len(bs) else 0,
         ge3=int((bs >= 3).sum()) if len(bs) else 0,
@@ -190,13 +201,18 @@ def _recent_trade_dates(session, n: int) -> list[date]:
     ).all())
 
 
-def main() -> None:
-    ap = argparse.ArgumentParser(description="抓取市场情绪")
-    ap.add_argument("--date", default=None)
-    ap.add_argument("--backfill", type=int, default=0)
-    ap.add_argument("--rephase", action="store_true", help="不抓取,只用库内数据重算阶段")
-    args = ap.parse_args()
+def run(target: date | None = None, backfill: int = 0, rephase: bool = False) -> None:
+    """抓取并落库。供 daily_pipeline 直接调用，不经命令行。"""
+    class _A:
+        pass
+    args = _A()
+    args.date = target.isoformat() if target else None
+    args.backfill = backfill
+    args.rephase = rephase
+    _run(args)
 
+
+def _run(args) -> None:
     if args.rephase:
         with session_scope() as s:
             days = sorted(s.scalars(select(MarketSentiment.trade_date)).all())
@@ -244,6 +260,14 @@ def main() -> None:
         log.info("最新 %s: 阶段=%s(%s) 晋级率=%s 高度=%d 二板+=%d",
                  last.trade_date, last.phase, last.stance,
                  last.advance_rate, last.height, last.ge2)
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description="抓取市场情绪")
+    ap.add_argument("--date", default=None)
+    ap.add_argument("--backfill", type=int, default=0)
+    ap.add_argument("--rephase", action="store_true", help="不抓取,只用库内数据重算阶段")
+    _run(ap.parse_args())
 
 
 if __name__ == "__main__":

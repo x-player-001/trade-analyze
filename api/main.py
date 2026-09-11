@@ -10,6 +10,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
 from api.routers import (
+    concept,
+    hotspot,
     lowvol,
     market,
     picks,
@@ -42,6 +44,8 @@ app.include_router(quotes.router)
 app.include_router(watch.router)
 app.include_router(lowvol.router)
 app.include_router(sentiment.router)
+app.include_router(hotspot.router)
+app.include_router(concept.router)
 
 
 @app.get("/health", tags=["meta"], summary="健康检查")

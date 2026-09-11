@@ -20,6 +20,8 @@ from common.params import (
 from engine.datasource.pipeline import sync_daily_all
 from engine.datasource.tushare_source import TushareSource
 from engine.selection.selector import run_selection_multi
+from engine.jobs.fetch_hotspot import run as fetch_hotspot
+from engine.jobs.fetch_sentiment import run as fetch_sentiment
 from engine.jobs.watch_lowvol import detect_new_entries as detect_lowvol
 from engine.jobs.watch_lowvol import track_and_settle as settle_lowvol
 from engine.jobs.watch_pool import detect_new_entries, track_daily
@@ -84,6 +86,21 @@ def main() -> None:
             settle_lowvol(s)                            # 放量池:结算T+N收益
     except Exception:
         log.exception("监控池更新失败")
+
+    # 5. 热点快照：概念板块 + 涨停题材落库（盘中看板走实时接口，这里只积累历史）。
+    #    同花顺只给板块当前快照、无批量历史接口，不每天存就永远补不回来。
+    try:
+        fetch_hotspot()
+    except Exception:
+        log.exception("热点快照失败")
+
+    # 6. 市场情绪：连板梯队 + 6阶段周期落库。
+    #    曾漏接导致 market_sentiment 停更两天(09-09 而行情已到 09-11)。
+    #    盘中实时阶段走 /api/hotspot/sentiment，本步只负责积累历史序列。
+    try:
+        fetch_sentiment()
+    except Exception:
+        log.exception("情绪快照失败")
 
     log.info("===== 每日管线结束 =====")
 

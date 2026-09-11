@@ -352,3 +352,175 @@ class PhaseStatOut(BaseModel):
     avg_zt: Optional[float] = None
     avg_height: Optional[float] = None
     avg_advance: Optional[float] = None
+
+
+# ---------------- 盘中实时热点（同花顺源，不落库） ----------------
+class ConceptHeatOut(BaseModel):
+    """概念板块实时行情。涨幅与成交额同时靠前才是真有资金进场。"""
+    thscode: str
+    name: str
+    last_price: float = 0.0
+    pct_chg: float = 0.0
+    turnover: float = 0.0          # 成交额(元)
+    volume: float = 0.0
+
+
+class LimitUpLiveOut(BaseModel):
+    """实时涨停个股。"""
+    code: str
+    name: str
+    pct_chg: float = 0.0
+    last_price: float = 0.0
+    boards: int = 1                # 连板数
+    boards_text: Optional[str] = None
+    limit_up_time: Optional[str] = None
+    seal_money: float = 0.0        # 封单金额
+    max_seal_money: float = 0.0
+    reason: Optional[str] = None   # 原始涨停原因串
+    themes: List[str] = []         # 拆解后的题材标签
+    is_st: bool = False
+    is_new: bool = False
+
+
+class ThemeTagOut(BaseModel):
+    """题材热度——涨停原因聚合后的词频，出现最多的即当日主线。"""
+    theme: str
+    count: int                     # 有几只涨停股挂这个标签
+    max_boards: int = 0            # 该题材下最高连板数
+    names: List[str] = []
+
+
+class LadderTierLiveOut(BaseModel):
+    """官方连板天梯的一档。"""
+    trade_date: Optional[str] = None
+    tier: str                      # two_board / three_board / ...
+    boards: int = 0
+    count: int = 0
+    codes: List[str] = []
+    names: List[str] = []
+    seal_nextday: List[bool] = []  # 次日是否封板(官方晋级结果)
+
+
+class HotStockOut(BaseModel):
+    code: str
+    name: str
+    rank: int = 0
+    heat: float = 0.0
+    rank_change: int = 0
+    rank_trend: Optional[str] = None   # up/down/flat
+
+
+class HotspotOverviewOut(BaseModel):
+    """看板首屏总览。"""
+    updated_at: str
+    zt_count: int = 0
+    max_boards: int = 0
+    lianban_count: int = 0
+    concepts: List[ConceptHeatOut] = []
+    themes: List[ThemeTagOut] = []
+    top_limitup: List[LimitUpLiveOut] = []
+    hot: List[HotStockOut] = []
+
+
+# ---------------- 概念板块映射 ----------------
+class ConceptBriefOut(BaseModel):
+    """个股所属的一个概念。"""
+    thscode: str
+    concept_name: str
+    member_count: int = 0          # 该概念成分股数，判断宽窄用
+    is_broad: bool = False         # 是否宽基/交易属性标签(非题材)
+
+
+class StockConceptsOut(BaseModel):
+    """个股 → 所属概念列表。"""
+    code: str
+    stock_name: Optional[str] = None
+    total: int = 0
+    concepts: List[ConceptBriefOut] = []
+
+
+class ConceptMemberOut(BaseModel):
+    code: str
+    stock_name: Optional[str] = None
+
+
+class ConceptDetailOut(BaseModel):
+    """概念 → 成分股。"""
+    thscode: str
+    concept_name: str
+    member_count: int = 0
+    is_broad: bool = False
+    members: List[ConceptMemberOut] = []
+
+
+class ConceptListItemOut(BaseModel):
+    thscode: str
+    concept_name: str
+    member_count: int
+    is_broad: bool = False
+
+
+# ---------------- 集合竞价 ----------------
+class AuctionOut(BaseModel):
+    """集合竞价快照。对「尾盘买入、次日卖出」打法最关键的开盘信号。"""
+    code: str
+    name: str
+    auction_price: Optional[float] = None      # 竞价价
+    auction_pct: Optional[float] = None        # 竞价涨跌幅%
+    auction_volume: Optional[float] = None
+    auction_amount: Optional[float] = None     # 竞价成交额
+    unmatched: Optional[float] = None          # 未匹配量,负=卖压
+    turnover_pct: Optional[float] = None       # 竞价换手率%
+    vs_yesterday_pct: Optional[float] = None   # 竞价量占昨日成交比%
+    volume_ratio: Optional[float] = None       # 竞价量比
+    prev_close: Optional[float] = None
+    tags: List[str] = []                       # 题材标签(风向标接口提供)
+
+
+class AuctionBenchmarkOut(BaseModel):
+    """短线风向标：官方筛选的竞价标的。"""
+    code: str
+    name: str
+    auction_pct: Optional[float] = None
+    tags: List[str] = []
+
+
+class LimitDownOut(BaseModel):
+    code: str
+    name: str
+    pct_chg: Optional[float] = None
+    last_price: Optional[float] = None
+    first_limit_time: Optional[str] = None
+    last_limit_time: Optional[str] = None
+    turnover_pct: Optional[float] = None
+
+
+class LiveSentimentOut(BaseModel):
+    """盘中实时情绪。用当日实时涨停/跌停/连板算，不读库。
+
+    与 /api/sentiment/today 的区别：那个读库，盘中只能给出**昨收**的阶段；
+    这个用实时数据算**当下**的阶段，60秒刷新。
+    """
+    as_of: str                          # 数据时间戳
+    trade_date: Optional[str] = None
+    # 实时计数
+    zt_count: int = 0
+    dt_count: int = 0
+    zt_dt_ratio: Optional[float] = None
+    first_board: int = 0
+    ge2: int = 0
+    ge3: int = 0
+    ge5: int = 0
+    height: int = 0
+    tier_filled: int = 0
+    advance_rate: Optional[float] = None    # 晋级率:昨日连板池今日续板比例
+    # 阶段（实时判定，未做2日确认——盘中本就该看当下）
+    phase: Optional[str] = None
+    stance: Optional[str] = None
+    phase_hist_ret5: Optional[float] = None
+    phase_hist_excess5: Optional[float] = None
+    phase_hist_days: Optional[int] = None
+    # 昨收对照（来自库，便于看变化）
+    prev_phase: Optional[str] = None
+    prev_zt_count: Optional[int] = None
+    prev_height: Optional[int] = None
