@@ -24,6 +24,9 @@ class Settings(BaseSettings):
 
     # 数据源
     tushare_token: str = ""
+    # 同花顺金融数据 API (fuyao.aicubes.cn)。盘中实时热点用，见
+    # engine/datasource/hithink_source.py
+    ths_key: str = ""
 
     # 选股参数版本
     active_param_version: str = "v1"
