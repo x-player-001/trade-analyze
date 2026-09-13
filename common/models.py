@@ -744,3 +744,164 @@ class StockConcept(Base, TimestampMixin):
     concept_name: Mapped[str] = mapped_column(String(48), nullable=False, default="",
                                               index=True, comment="概念名称")
     stock_name: Mapped[Optional[str]] = mapped_column(String(32))
+
+
+# ---------------------------------------------------------------------------
+# 突破回踩监控池：与 watch_pool / watch_lowvol 独立，因为【触发时机不同】
+# ---------------------------------------------------------------------------
+class WatchPullback(Base, TimestampMixin):
+    """突破回踩监控池——底部横盘 → 涨停启动 → 回调至均线附近。
+
+    **与 watch_pool 的本质差别是「入池时机」**：
+        watch_pool    首板日当天盘后入池 → 被动等 30 天
+        watch_pullback 首板日只登记 → 【回调到 MA10 附近才触发入池】
+
+    故触发日(pullback_date)不是涨停日(breakout_date)，是二次确认事件。
+    单独成表而非共用 watch_pool 的原因：曾把低位放量塞进 watch_pool 用
+    pattern 字段区分，结果被迫共用「30日内再次涨停」标签，命中率失真到
+    17.97%（低于随机基准）。**不是形态无效，是标签错配**——共表会逼着
+    共用结算逻辑。见 watch_lowvol 的同类注释。
+
+    入池条件（只用回踩日及之前的信息，无未来函数）：
+        启动 = 低位(距120日低点≤50%) + 首板(前60日无涨停) 的涨停日
+        回踩 = 启动后 2~15 个交易日内，收盘首次落入 MA10 ±3%
+        未破 = 回踩日收盘不低于启动日【开盘价】（破了说明启动失败）
+        非ST
+
+    **观测标签：回踩后 10 个交易日内是否再次涨停**（窗口与收益率一并记录，
+    因为本形态的预期是"回调结束后二次启动"，涨停是最直接的确认）。
+
+    ⚠️ 本形态【尚未回测验证】，与 watch_pool/watch_lowvol 不同——那两个的
+    权重都来自实测 IC。此处 **不做评分排序**，只做客观记录，理由见下：
+    项目内「缩量回调」方向已被三套独立数据证伪（选股 shrink_consolidation
+    IC=-0.142、涨停后缩量组 15.05% vs 放量组 42.73%、老严缩量回踩 T+5
+    超额 -3.42 全表最差）。本形态不要求缩量、且带底部横盘前置结构，与
+    那三者不完全同源，故值得独立观测——但在积累出自己的样本前，**任何
+    排序权重都是拍脑袋**。字段先落库，攒够样本再谈建模。
+    """
+
+    __tablename__ = "watch_pullback"
+    __table_args__ = (
+        UniqueConstraint("code", "breakout_date", name="uq_wpb_code_breakout"),
+    )
+
+    id: Mapped[int] = mapped_column(BigIntPK, primary_key=True, autoincrement=True)
+    code: Mapped[str] = mapped_column(String(10), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(32), nullable=False, default="")
+    board_group: Mapped[str] = mapped_column(String(8), nullable=False, default="main")
+
+    # ---- 第一阶段：启动（涨停日）----
+    breakout_date: Mapped[date] = mapped_column(Date, nullable=False, index=True,
+                                                comment="启动涨停日")
+    breakout_close: Mapped[float] = mapped_column(Price, comment="启动日原始收盘")
+    breakout_open: Mapped[Optional[float]] = mapped_column(Price, comment="启动日原始开盘")
+    breakout_pct: Mapped[float] = mapped_column(Float, comment="启动日涨幅%")
+    breakout_amount: Mapped[Optional[float]] = mapped_column(Money, comment="启动日成交额")
+    # 启动日距120日最低收盘涨幅%（低位程度，越小越低位）
+    gain_from_low: Mapped[float] = mapped_column(Float, comment="距120日低点涨幅%")
+    # 启动日成交额/前20日均额。watch_pool 实测 IC -0.098（放量越夸张后续越差），
+    # 本池先记录不计分——形态不同，不可直接套用那边的权重。
+    breakout_vol_ratio: Mapped[Optional[float]] = mapped_column(
+        Float, comment="启动日放量倍数(vs前20日均额)"
+    )
+    # 启动前连续多少日收盘在 120日低点×1.3 以内。
+    # watch_pool 实测 IC≈0.0007 无区分度，故【只记录不作入池条件】。
+    flat_days: Mapped[Optional[int]] = mapped_column(Integer, comment="启动前横盘天数")
+    # 启动段内涨停板数。【观测字段，streak 口径下不再是入池条件】
+    breakout_boards: Mapped[Optional[int]] = mapped_column(
+        Integer, comment="启动段内涨停板数"
+    )
+    # ---- 启动段口径（两种共存一表，可事后分组对比哪种更强）----
+    # limitup = 单根阳线即达标且该根涨停（与旧涨停口径等价，历史数据均为此值）
+    # streak  = 多根连续阳线累计达标
+    entry_kind: Mapped[str] = mapped_column(
+        String(12), nullable=False, default="streak", index=True,
+        comment="limitup/streak"
+    )
+    # 启动段阳线根数（不含中间的十字星——平盘不算断也不计数）
+    streak_days: Mapped[Optional[int]] = mapped_column(
+        Integer, index=True, comment="启动段阳线根数"
+    )
+    # 启动段累计涨幅%：段首【开盘】→ 段末【收盘】
+    streak_gain: Mapped[Optional[float]] = mapped_column(
+        Float, comment="启动段累计涨幅%(段首开→段末收)"
+    )
+    # 启动段最后一根阳线的日期。回踩窗口从这天之后起算，不是 breakout_date
+    streak_end_date: Mapped[Optional[date]] = mapped_column(
+        Date, comment="启动段末日(回踩窗口起算点)"
+    )
+    # 启动段前60日无涨停。【观测字段】——streak 口径不再要求首板，
+    # 因为「连续阳线爬升」本就可以完全不含涨停。
+    first_board: Mapped[Optional[bool]] = mapped_column(
+        Boolean, index=True, comment="启动段前60日无涨停"
+    )
+
+    # ---- 第二阶段：回踩（触发入池）----
+    pullback_date: Mapped[date] = mapped_column(Date, nullable=False, index=True,
+                                                comment="回踩确认日=入池日")
+    pullback_close: Mapped[float] = mapped_column(Price, comment="回踩日原始收盘")
+    # 距启动日收盘的回撤%（负值=已回落）。连板时此值可能为正——价格仍高于
+    # 启动日收盘，但已从连板段高点回落，故另记 drawdown_from_peak。
+    drawdown: Mapped[Optional[float]] = mapped_column(Float, comment="相对启动日收盘%")
+    # 启动段(含连板)最高收盘，及相对它的回撤%——这才是「回调深度」的正确口径。
+    # 入池判据用的是 drawdown_from_peak <= -1%，不是 drawdown。
+    peak_close: Mapped[Optional[float]] = mapped_column(Price, comment="启动段最高收盘")
+    drawdown_from_peak: Mapped[Optional[float]] = mapped_column(
+        Float, comment="相对启动段最高收盘%"
+    )
+    # 回踩日距各均线的距离%，触发判据是 dist_ma10。另两条一并记录，
+    # 是为了将来能回头看哪条均线更准，不必重跑。
+    dist_ma5: Mapped[Optional[float]] = mapped_column(Float, comment="距MA5 %")
+    dist_ma10: Mapped[Optional[float]] = mapped_column(Float, comment="距MA10 %")
+    dist_ma20: Mapped[Optional[float]] = mapped_column(Float, comment="距MA20 %")
+    # 启动日到回踩日经过的交易日数
+    pullback_days: Mapped[Optional[int]] = mapped_column(Integer, comment="启动→回踩交易日数")
+    # 回踩日成交额/启动日成交额。缩量回踩是「独自前行」与老严都强调的买点，
+    # 但项目内已三次证伪——【只记录不计分】，攒本池自己的样本再判。
+    pullback_vol_ratio: Mapped[Optional[float]] = mapped_column(
+        Float, comment="回踩日额比vs启动日"
+    )
+
+    # ---- 跟踪与结算 ----
+    # watching=跟踪中 / hit=窗口内再次涨停 / expired=窗口结束未涨停
+    status: Mapped[str] = mapped_column(
+        String(12), nullable=False, default="watching", index=True
+    )
+    hit_date: Mapped[Optional[date]] = mapped_column(Date)
+    hit_days: Mapped[Optional[int]] = mapped_column(Integer, comment="距回踩日交易日数")
+    expire_date: Mapped[Optional[date]] = mapped_column(Date, comment="10交易日窗口末日")
+    # 跌破启动日开盘价的日期（形态失效标志）。
+    # 【标记而非删除】——watch_pool 实测删除虽提升留存池命中率，但会误杀
+    # 36.5% 的命中票，且删了就无法再验证。前端可选过滤。
+    broke_date: Mapped[Optional[date]] = mapped_column(Date, comment="跌破启动日开盘价日")
+    broke_days: Mapped[Optional[int]] = mapped_column(Integer, comment="距回踩日天数")
+    # 回踩后 T+N 收益率%（相对回踩日收盘）。涨停标签之外并记收益率，
+    # 因为本形态未经验证，不预设"只有涨停才算成功"。
+    ret1: Mapped[Optional[float]] = mapped_column(Float, comment="回踩后T+1收益%")
+    ret3: Mapped[Optional[float]] = mapped_column(Float, comment="回踩后T+3收益%")
+    ret5: Mapped[Optional[float]] = mapped_column(Float, comment="回踩后T+5收益%")
+    ret10: Mapped[Optional[float]] = mapped_column(Float, comment="回踩后T+10收益%")
+    max_ret: Mapped[Optional[float]] = mapped_column(Float, comment="窗口内最大收益%")
+
+
+class WatchPullbackDaily(Base):
+    """突破回踩池每日跟踪——回踩入池后每个交易日一行，供前端画演化。"""
+
+    __tablename__ = "watch_pullback_daily"
+    __table_args__ = (
+        UniqueConstraint("pool_id", "trade_date", name="uq_wpbd_pool_date"),
+    )
+
+    id: Mapped[int] = mapped_column(BigIntPK, primary_key=True, autoincrement=True)
+    pool_id: Mapped[int] = mapped_column(BigIntPK, nullable=False, index=True)
+    code: Mapped[str] = mapped_column(String(10), nullable=False, index=True)
+    trade_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    days_since: Mapped[int] = mapped_column(Integer, comment="距回踩日第N个交易日")
+    close: Mapped[Optional[float]] = mapped_column(Price, comment="原始收盘")
+    pct_chg: Mapped[Optional[float]] = mapped_column(Float)
+    ret_since: Mapped[Optional[float]] = mapped_column(Float, comment="相对回踩日收盘%")
+    # 用 amount 而非 volume——volume 在 2026-06-15 切 tushare 时单位由股变手
+    # （100倍断层），跨该日不可比。
+    amount_ratio: Mapped[Optional[float]] = mapped_column(Float, comment="额比vs回踩日")
+    dist_ma10: Mapped[Optional[float]] = mapped_column(Float, comment="距MA10 %")
+    is_limit_up: Mapped[bool] = mapped_column(Boolean, default=False)

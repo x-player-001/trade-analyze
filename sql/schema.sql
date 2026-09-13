@@ -311,3 +311,82 @@ CREATE TABLE IF NOT EXISTS watch_lowvol_daily (
   KEY idx_lvd_code (code),
   KEY idx_lvd_date (trade_date)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='低位放量池每日跟踪';
+
+-- ---------------------------------------------------------------------------
+-- 突破回踩池：底部横盘 → 涨停启动 → 回调至MA10附近。触发日=回踩日，非涨停日。
+-- 与 watch_pool / watch_lowvol 独立成表——三者标签与触发时机各不相同，
+-- 共表会被迫共用结算逻辑（曾致 lowvol 命中率失真至 17.97%）。
+-- 注意 COLLATE 必须显式写死与其它表一致，否则 JOIN 报 collation 混用错误。
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS watch_pullback (
+  id                 BIGINT      NOT NULL AUTO_INCREMENT,
+  code               VARCHAR(10) NOT NULL,
+  name               VARCHAR(32) NOT NULL DEFAULT '',
+  board_group        VARCHAR(8)  NOT NULL DEFAULT 'main',
+  -- 阶段一：启动
+  breakout_date      DATE        NOT NULL COMMENT '启动涨停日',
+  breakout_close     DECIMAL(12,3) COMMENT '启动日原始收盘',
+  breakout_open      DECIMAL(12,3) COMMENT '启动日原始开盘',
+  breakout_pct       FLOAT       COMMENT '启动日涨幅%',
+  breakout_amount    DECIMAL(20,2) COMMENT '启动日成交额',
+  gain_from_low      FLOAT       COMMENT '距120日低点涨幅%',
+  breakout_vol_ratio FLOAT       COMMENT '启动日放量倍数(vs前20日均额)',
+  flat_days          INT         COMMENT '启动前横盘天数(仅记录,IC≈0不计分)',
+  breakout_boards    INT         COMMENT '启动段内涨停板数(观测字段)',
+  entry_kind         VARCHAR(12) NOT NULL DEFAULT 'streak' COMMENT 'limitup单根涨停/streak多根阳线',
+  streak_days        INT         COMMENT '启动段阳线根数(不含中间十字星)',
+  streak_gain        FLOAT       COMMENT '启动段累计涨幅%(段首开→段末收)',
+  streak_end_date    DATE        COMMENT '启动段末日(回踩窗口起算点)',
+  first_board        TINYINT(1)  COMMENT '启动段前60日无涨停(观测字段)',
+  -- 阶段二：回踩(=入池日)
+  pullback_date      DATE        NOT NULL COMMENT '回踩确认日=入池日',
+  pullback_close     DECIMAL(12,3) COMMENT '回踩日原始收盘',
+  drawdown           FLOAT       COMMENT '相对启动日收盘%(连板时可为正)',
+  peak_close         DECIMAL(12,3) COMMENT '启动段最高收盘',
+  drawdown_from_peak FLOAT       COMMENT '相对启动段最高收盘%(回调深度,入池判据)',
+  dist_ma5           FLOAT       COMMENT '距MA5 %',
+  dist_ma10          FLOAT       COMMENT '距MA10 %(触发判据±3%)',
+  dist_ma20          FLOAT       COMMENT '距MA20 %',
+  pullback_days      INT         COMMENT '启动→回踩交易日数',
+  pullback_vol_ratio FLOAT       COMMENT '回踩日额比vs启动日',
+  -- 跟踪与结算
+  status             VARCHAR(12) NOT NULL DEFAULT 'watching' COMMENT 'watching/hit/expired',
+  hit_date           DATE,
+  hit_days           INT         COMMENT '距回踩日交易日数',
+  expire_date        DATE        COMMENT '10交易日窗口末日(未走满留NULL)',
+  broke_date         DATE        COMMENT '跌破启动日开盘价日(标记非删除)',
+  broke_days         INT         COMMENT '距回踩日天数',
+  ret1               FLOAT       COMMENT '回踩后T+1收益%',
+  ret3               FLOAT       COMMENT '回踩后T+3收益%',
+  ret5               FLOAT       COMMENT '回踩后T+5收益%',
+  ret10              FLOAT       COMMENT '回踩后T+10收益%',
+  max_ret            FLOAT       COMMENT '窗口内最大收益%',
+  created_at         DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at         DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_wpb_code_breakout (code, breakout_date),
+  KEY idx_wpb_code (code),
+  KEY idx_wpb_pullback (pullback_date),
+  KEY idx_wpb_breakout (breakout_date),
+  KEY idx_wpb_status (status),
+  KEY idx_wpb_kind (entry_kind),
+  KEY idx_wpb_streak (streak_days)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='突破回踩池(触发=回踩日)';
+
+CREATE TABLE IF NOT EXISTS watch_pullback_daily (
+  id           BIGINT      NOT NULL AUTO_INCREMENT,
+  pool_id      BIGINT      NOT NULL,
+  code         VARCHAR(10) NOT NULL,
+  trade_date   DATE        NOT NULL,
+  days_since   INT         COMMENT '距回踩日第N个交易日',
+  close        DECIMAL(12,3) COMMENT '原始收盘',
+  pct_chg      FLOAT,
+  ret_since    FLOAT       COMMENT '相对回踩日收盘%',
+  amount_ratio FLOAT       COMMENT '额比vs回踩日',
+  dist_ma10    FLOAT       COMMENT '距MA10 %',
+  is_limit_up  TINYINT(1)  NOT NULL DEFAULT 0,
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_wpbd_pool_date (pool_id, trade_date),
+  KEY idx_wpbd_code (code),
+  KEY idx_wpbd_date (trade_date)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='突破回踩池每日跟踪';

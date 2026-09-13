@@ -25,6 +25,8 @@ from engine.jobs.fetch_sentiment import run as fetch_sentiment
 from engine.jobs.watch_lowvol import detect_new_entries as detect_lowvol
 from engine.jobs.watch_lowvol import track_and_settle as settle_lowvol
 from engine.jobs.watch_pool import detect_new_entries, track_daily
+from engine.jobs.watch_pullback import detect_new_entries as detect_pullback
+from engine.jobs.watch_pullback import track_daily as track_pullback
 from engine.validation.validator import backfill_validations
 
 log = setup_logging("daily_pipeline")
@@ -73,7 +75,8 @@ def main() -> None:
     except Exception:
         log.exception("验证回填失败")
 
-    # 4. 低位首板监控池：检测新入池 + 跟踪量价 + 结算命中/到期
+    # 4. 监控池三形态：低位首板 / 低位放量 / 突破回踩。各自独立表与标签——
+    #    曾把两形态塞进同一张表被迫共用涨停标签，命中率失真到17.97%。
     #    与选股完全独立(不同形态、不同验证口径)，失败不影响前三步已完成的工作。
     try:
         with session_scope() as s:
@@ -84,6 +87,10 @@ def main() -> None:
             detect_lowvol(s, lookback_days=1)           # 形态2:低位放量
         with session_scope() as s:
             settle_lowvol(s)                            # 放量池:结算T+N收益
+        with session_scope() as s:
+            detect_pullback(s, lookback_days=1)         # 形态3:突破回踩
+        with session_scope() as s:
+            track_pullback(s)                           # 回踩池:结算涨停+收益
     except Exception:
         log.exception("监控池更新失败")
 

@@ -524,3 +524,96 @@ class LiveSentimentOut(BaseModel):
     prev_phase: Optional[str] = None
     prev_zt_count: Optional[int] = None
     prev_height: Optional[int] = None
+
+
+# ---------------- 突破回踩池（独立表，触发时机=回踩日而非涨停日） ----------------
+class PullbackTrackOut(BaseModel):
+    """池内标的的单日跟踪点（回踩入池后）。"""
+    trade_date: date
+    days_since: int            # 距回踩日第N个交易日
+    close: Optional[float] = None
+    pct_chg: Optional[float] = None
+    ret_since: Optional[float] = None      # 相对回踩日收盘%
+    amount_ratio: Optional[float] = None   # 成交额/回踩日成交额
+    dist_ma10: Optional[float] = None      # 距MA10 %
+    is_limit_up: bool = False
+
+
+class PullbackOut(ORMModel):
+    """突破回踩入池记录：底部横盘 → 涨停启动 → 回调至MA10附近。
+
+    ⚠️ 本形态【尚未回测验证】，故无评分字段——watch_pool/watch_lowvol 的权重
+    都来自实测 IC，此处没有样本可依据，任何排序权重都是拍脑袋。
+    `breakout_vol_ratio`/`pullback_vol_ratio`/`flat_days` 已落库，攒够样本
+    后可回头做 IC 分档。排序默认按回踩日倒序（最新的在前）。
+    """
+    id: int
+    code: str
+    name: str
+    board_group: str
+    # ---- 阶段一：启动 ----
+    breakout_date: date                          # 启动涨停日
+    breakout_close: Optional[float] = None
+    breakout_open: Optional[float] = None
+    breakout_pct: Optional[float] = None
+    breakout_amount: Optional[float] = None
+    gain_from_low: float                         # 距120日低点涨幅%(低位程度)
+    breakout_vol_ratio: Optional[float] = None   # 启动日放量倍数
+    flat_days: Optional[int] = None              # 启动前横盘天数(仅展示)
+    breakout_boards: Optional[int] = None        # 启动段内涨停板数(观测字段)
+    entry_kind: str = "streak"                   # limitup=单根涨停 / streak=多根阳线
+    streak_days: Optional[int] = None            # 启动段阳线根数
+    streak_gain: Optional[float] = None          # 启动段累计涨幅%(段首开→段末收)
+    streak_end_date: Optional[date] = None       # 启动段末日(回踩窗口起算点)
+    first_board: Optional[bool] = None           # 启动段前60日无涨停(观测字段)
+    # ---- 阶段二：回踩(=入池日) ----
+    pullback_date: date
+    pullback_close: Optional[float] = None
+    drawdown: Optional[float] = None             # 相对启动日收盘%(连板时可为正)
+    peak_close: Optional[float] = None           # 启动段最高收盘
+    drawdown_from_peak: Optional[float] = None   # 相对启动段最高收盘%(回调深度)
+    dist_ma5: Optional[float] = None
+    dist_ma10: Optional[float] = None            # 触发判据(±3%内)
+    dist_ma20: Optional[float] = None
+    pullback_days: Optional[int] = None          # 启动→回踩交易日数
+    pullback_vol_ratio: Optional[float] = None   # 回踩日额比vs启动日
+    # ---- 跟踪与结算 ----
+    status: str                                  # watching / hit / expired
+    hit_date: Optional[date] = None
+    hit_days: Optional[int] = None
+    expire_date: Optional[date] = None
+    broke_date: Optional[date] = None            # 跌破启动日开盘价(标记非删除)
+    broke_days: Optional[int] = None
+    ret1: Optional[float] = None
+    ret3: Optional[float] = None
+    ret5: Optional[float] = None
+    ret10: Optional[float] = None
+    max_ret: Optional[float] = None
+    # 最近一个跟踪点(列表页展示用)
+    last_ret_since: Optional[float] = None
+    last_dist_ma10: Optional[float] = None
+    days_in_pool: Optional[int] = None
+    track: List[PullbackTrackOut] = []           # 仅详情接口填充
+
+
+class PullbackStatsOut(BaseModel):
+    """突破回踩池统计（已结算样本）。
+
+    ⚠️ 无历史基准可比——本形态未回测，`hit_rate` 只是本池自身的观测值，
+    不代表相对随机的 edge。要判断有没有 edge 需与同期全市场基准对照。
+    """
+    total: int
+    watching: int
+    hit: int
+    expired: int
+    hit_rate: Optional[float] = None       # hit/(hit+expired) %
+    avg_hit_days: Optional[float] = None
+    avg_ret5: Optional[float] = None
+    avg_ret10: Optional[float] = None
+    avg_max_ret: Optional[float] = None
+    # 按启动段连板数分组的命中率
+    by_boards: Dict[str, float] = {}
+    # 按启动口径分组：limitup(单根涨停) vs streak(多根连续阳线)
+    by_entry_kind: Dict[str, float] = {}
+    note: str = ("本形态尚未回测验证，命中率无历史基准可比；"
+                 "参考：watch_pool 30日内再涨停 随机基准 19.87%")
