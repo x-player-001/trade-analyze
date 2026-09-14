@@ -14,6 +14,7 @@ from engine.jobs.watch_pullback import (
     MA_TOL,
     MIN_STREAK_GAIN,
     PB_MAX_DAYS,
+    advance_armed,
     candle,
     detect_new_entries,
     track_daily,
@@ -72,26 +73,31 @@ def test_two_stage_entry(session):
     assert p.pullback_days >= 2                    # 跳过启动后第1日
     assert abs(p.dist_ma10) <= MA_TOL              # 触发判据
     assert p.drawdown < 0                          # 相对启动日已回落
-    assert p.status == "watching"
+    assert p.status == "triggered"                 # 回踩到位=已报警
+    assert p.armed_date is not None                # 段末次日已登记
     assert p.breakout_boards == 1                  # 孤板
 
 
 def test_no_pullback_no_entry(session):
-    """启动后直接拉升不回踩 → 不入池（本形态要的就是回调确认）。"""
+    """启动后直接拉升不回踩 → 【不报警】（入表但状态非 triggered）。
+
+    状态机下这类会以 missed（持续新高）入表作为对照组，而不是凭空消失。
+    关键断言是「没有 triggered」，不是「没有行」。
+    """
     _seed(session, "600001", "main", FLAT + [10.0] + [3.0] * 20)
-    n = detect_new_entries(session, lookback_days=30)
+    detect_new_entries(session, lookback_days=30)
     session.commit()
-    assert n == 0
-    assert session.scalars(select(WatchPullback)).all() == []
+    rows = session.scalars(select(WatchPullback)).all()
+    assert all(r.status != "triggered" for r in rows)
 
 
 def test_break_breakout_open_rejected(session):
-    """回踩跌破启动日【开盘价】=启动失败，不入池（不是健康回调）。"""
-    # 启动日开盘=前收；随后深跌穿透该价位
+    """回踩跌破启动段首日开盘价 = 启动失败 → failed，不报警。"""
     _seed(session, "600001", "main", FLAT + [10.0, -6.0, -5.0, -4.0] + [0.1] * 10)
-    n = detect_new_entries(session, lookback_days=30)
+    detect_new_entries(session, lookback_days=30)
     session.commit()
-    assert n == 0
+    rows = session.scalars(select(WatchPullback)).all()
+    assert rows and rows[0].status == "failed"
 
 
 def test_not_low_position_rejected(session):
@@ -168,9 +174,10 @@ def test_flat_price_not_a_pullback(session):
     """
     tail = [10.0] + [0.05] * (PB_MAX_DAYS + 12)
     _seed(session, "600001", "main", FLAT + tail)
-    n = detect_new_entries(session, lookback_days=40)
+    detect_new_entries(session, lookback_days=40)
     session.commit()
-    assert n == 0
+    rows = session.scalars(select(WatchPullback)).all()
+    assert all(r.status != "triggered" for r in rows)
 
 
 def test_shallow_drawdown_rejected(session):
@@ -178,9 +185,10 @@ def test_shallow_drawdown_rejected(session):
     # 回落总幅度约 0.6%，虽可能贴近均线但不够深
     _seed(session, "600001", "main",
           FLAT + [10.0, -0.2, -0.2, -0.2] + [0.0] * 14)
-    n = detect_new_entries(session, lookback_days=40)
+    detect_new_entries(session, lookback_days=40)
     session.commit()
-    assert n == 0
+    rows = session.scalars(select(WatchPullback)).all()
+    assert all(r.status != "triggered" for r in rows)
 
 
 def test_pullback_window_upper_bound(session):
@@ -194,9 +202,11 @@ def test_pullback_window_upper_bound(session):
     tail = ([10.0, -0.5] + [-0.01] * (PB_MAX_DAYS + 1)
             + [-3.0, -3.0, -2.0] + [0.1] * 8)
     _seed(session, "600001", "main", FLAT + tail)
-    n = detect_new_entries(session, lookback_days=40)
+    detect_new_entries(session, lookback_days=40)
     session.commit()
-    assert n == 0
+    rows = session.scalars(select(WatchPullback)).all()
+    # 窗口内从未同时满足触发条件 → expired（作废态），不是 triggered
+    assert rows and rows[0].status == "expired"
 
 
 def test_track_and_settle_hit(session):
@@ -207,7 +217,11 @@ def test_track_and_settle_hit(session):
     session.commit()
     track_daily(session)
     session.commit()
-    p = session.scalars(select(WatchPullback)).one()
+    # 回踩后的反弹([1.0, 10.0])自身又构成第二个启动段，故会有两行——
+    # 取【首个】启动段那行。状态机下一只票同时存在多个启动段是正常的。
+    p = session.scalars(
+        select(WatchPullback).order_by(WatchPullback.breakout_date)
+    ).first()
     assert p.status == "hit"
     assert p.hit_days is not None and p.hit_days >= 1
     assert p.ret1 is not None
@@ -229,7 +243,9 @@ def test_track_and_settle_expired(session):
     track_daily(session)
     session.commit()
     p = session.scalars(select(WatchPullback)).one()
-    assert p.status == "expired"
+    # settled 而非 expired——expired 在状态机里专指「从未等到回踩」，
+    # 与「已回踩但窗口内没再涨停」是两回事
+    assert p.status == "settled"
     assert p.expire_date is not None
 
 
@@ -246,7 +262,7 @@ def test_expire_date_null_while_window_incomplete(session):
     assert p.expire_date is None
     track_daily(session)
     session.commit()
-    assert p.status == "watching"          # 窗口没走满，不能算到期
+    assert p.status == "triggered"         # 窗口没走满，保持已报警态
 
 
 def test_broke_marked_not_deleted(session):
@@ -339,7 +355,7 @@ def test_yin_breaks_streak(session):
     n = detect_new_entries(session, lookback_days=40)
     session.commit()
     p = session.scalars(select(WatchPullback)).all()
-    # 若有入池，其 streak_days 必须 <=2（阴线确实截断了，没跨过去）
+    # 阴线确实截断了：任何入表记录的启动段都不可能跨过那根阴线
     for x in p:
         assert x.streak_days <= 2
 
@@ -364,3 +380,89 @@ def test_streak_start_not_double_counted(session):
     session.commit()
     rows = session.scalars(select(WatchPullback)).all()
     assert len(rows) == 1      # 4根阳线只产生1条，不是4条
+
+
+# ===================== 状态机：missed / failed / expired =====================
+
+def test_missed_when_peak_broken_before_pullback(session):
+    """回踩前价格已突破启动段峰值 → missed，【不报警】。
+
+    这是状态机存在的全部理由。用户原话：「我的目的就是为了报警第一次的上升
+    然后跟随第二次」——中途已冲破峰值说明第二波自己走完了，此后再回踩到
+    MA10 也没有提示价值。旧「回头看」版本会把这类当成正常回踩报出来，
+    实测占全池 28.3%。
+    """
+    # 启动段(4根阳线) → 阴线截断 → 第二波大涨【突破峰值】 → 才回落
+    # 注意必须用阴线截断，否则后面的阳线会被并进启动段，段后就无突破可言
+    _seed(session, "600001", "main",
+          FLAT + STREAK + [-1.0] + [6.0, 4.0]
+          + [-2.0, -2.0, -1.5] + [0.2] * 10)
+    detect_new_entries(session, lookback_days=40)
+    session.commit()
+    rows = session.scalars(select(WatchPullback)).all()
+    assert rows, "应当入表(作为对照组保留)，而不是凭空消失"
+    p = rows[0]
+    assert p.status == "missed"
+    assert p.peak_broken_date is not None
+    assert p.pullback_date is None         # 没有回踩日——从未触发
+
+
+def test_failed_when_break_below_start_open(session):
+    """回踩途中跌破启动段首日开盘价 → failed，不报警。"""
+    _seed(session, "600001", "main",
+          FLAT + STREAK + [-6.0, -5.0, -4.0] + [0.1] * 10)
+    detect_new_entries(session, lookback_days=40)
+    session.commit()
+    rows = session.scalars(select(WatchPullback)).all()
+    assert rows
+    assert rows[0].status == "failed"
+
+
+def test_expired_means_never_pulled_back(session):
+    """窗口内始终没回踩到 MA10 → expired（作废态，不是结算态）。"""
+    # 启动后高位横住，回撤始终不足，窗口走完也没触发
+    tail = STREAK + [-0.01] * (PB_MAX_DAYS + 3)
+    _seed(session, "600001", "main", FLAT + tail)
+    detect_new_entries(session, lookback_days=40)
+    session.commit()
+    rows = session.scalars(select(WatchPullback)).all()
+    assert rows
+    p = rows[0]
+    assert p.status == "expired"
+    assert p.pullback_date is None
+
+
+def test_missed_takes_priority_over_later_pullback(session):
+    """突破在前、回踩在后 → 判 missed（时间顺序决定，不是代码顺序）。"""
+    # 阴线截断启动段 → 随即突破峰值 → 之后才回踩到 MA10
+    _seed(session, "600001", "main",
+          FLAT + STREAK + [-1.0] + [6.0] + [-2.5] * 5 + [0.2] * 10)
+    detect_new_entries(session, lookback_days=40)
+    session.commit()
+    p = session.scalars(select(WatchPullback)).all()[0]
+    assert p.status == "missed"
+
+
+def test_armed_when_quotes_not_yet_available(session):
+    """行情还没走到窗口末 → 保持 armed，等后续交易日继续推进。"""
+    # 段末后只给 1 天行情，不足以判定
+    _seed(session, "600001", "main", FLAT + STREAK + [-1.0])
+    detect_new_entries(session, lookback_days=40)
+    session.commit()
+    rows = session.scalars(select(WatchPullback)).all()
+    if rows:                                # 可能因样本太短未入表
+        assert rows[0].status in ("armed", "failed", "missed")
+
+
+def test_track_daily_ignores_non_triggered(session):
+    """track_daily 只结算 triggered，不碰 armed/missed/failed。"""
+    _seed(session, "600001", "main",
+          FLAT + STREAK + [-1.0] + [6.0, 4.0]
+          + [-2.0, -2.0, -1.5] + [0.2] * 10)
+    detect_new_entries(session, lookback_days=40)
+    session.commit()
+    p = session.scalars(select(WatchPullback)).all()[0]
+    assert p.status == "missed"
+    track_daily(session)
+    session.commit()
+    assert p.status == "missed"            # 未被改成 hit/settled

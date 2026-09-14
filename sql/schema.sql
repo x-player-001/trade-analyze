@@ -337,10 +337,14 @@ CREATE TABLE IF NOT EXISTS watch_pullback (
   streak_days        INT         COMMENT '启动段阳线根数(不含中间十字星)',
   streak_gain        FLOAT       COMMENT '启动段累计涨幅%(段首开→段末收)',
   streak_end_date    DATE        COMMENT '启动段末日(回踩窗口起算点)',
-  first_board        TINYINT(1)  COMMENT '启动段前60日无涨停(观测字段)',
+  first_board        TINYINT(1)  COMMENT '启动段前60日无涨停(弱代理,默认不筛)',
+  -- 启动前20日 pct_chg 标准差 = 「底部横盘」的直接度量，入池主筛选维度。
+  -- 实测区分度是 first_board 的 3.6 倍：<1.5 T+10 +0.714% → >=4.0 -0.739%
+  vol20              FLOAT       COMMENT '启动前20日涨跌幅标准差(越小越安静)',
   -- 阶段二：回踩(=入池日)
-  pullback_date      DATE        NOT NULL COMMENT '回踩确认日=入池日',
-  pullback_close     DECIMAL(12,3) COMMENT '回踩日原始收盘',
+  -- 状态机下 armed/missed/failed/expired 从未回踩，这两列为 NULL
+  pullback_date      DATE        COMMENT '回踩确认日=报警日(未触发则空)',
+  pullback_close     DECIMAL(12,3) COMMENT '回踩日原始收盘(未触发则空)',
   drawdown           FLOAT       COMMENT '相对启动日收盘%(连板时可为正)',
   peak_close         DECIMAL(12,3) COMMENT '启动段最高收盘',
   drawdown_from_peak FLOAT       COMMENT '相对启动段最高收盘%(回调深度,入池判据)',
@@ -350,7 +354,11 @@ CREATE TABLE IF NOT EXISTS watch_pullback (
   pullback_days      INT         COMMENT '启动→回踩交易日数',
   pullback_vol_ratio FLOAT       COMMENT '回踩日额比vs启动日',
   -- 跟踪与结算
-  status             VARCHAR(12) NOT NULL DEFAULT 'watching' COMMENT 'watching/hit/expired',
+  -- 状态机：armed=待回踩(未报警) / triggered=已报警 / missed=第二波已启动作废
+  -- / failed=跌破段首开盘作废 / expired=未等到回踩 / hit,settled=触发后结算
+  status             VARCHAR(12) NOT NULL DEFAULT 'armed' COMMENT '状态机,见 models.py',
+  armed_date         DATE        COMMENT '登记待回踩日(段末次日)',
+  peak_broken_date   DATE        COMMENT '收盘突破启动段峰值日(=第二波已启动)',
   hit_date           DATE,
   hit_days           INT         COMMENT '距回踩日交易日数',
   expire_date        DATE        COMMENT '10交易日窗口末日(未走满留NULL)',
@@ -370,7 +378,9 @@ CREATE TABLE IF NOT EXISTS watch_pullback (
   KEY idx_wpb_breakout (breakout_date),
   KEY idx_wpb_status (status),
   KEY idx_wpb_kind (entry_kind),
-  KEY idx_wpb_streak (streak_days)
+  KEY idx_wpb_armed (armed_date),
+  KEY idx_wpb_streak (streak_days),
+  KEY idx_wpb_vol20 (vol20)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='突破回踩池(触发=回踩日)';
 
 CREATE TABLE IF NOT EXISTS watch_pullback_daily (

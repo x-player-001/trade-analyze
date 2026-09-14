@@ -830,16 +830,30 @@ class WatchPullback(Base, TimestampMixin):
     streak_end_date: Mapped[Optional[date]] = mapped_column(
         Date, comment="启动段末日(回踩窗口起算点)"
     )
-    # 启动段前60日无涨停。【观测字段】——streak 口径不再要求首板，
-    # 因为「连续阳线爬升」本就可以完全不含涨停。
+    # 启动段前60日无涨停。【观测字段，2026-09-13 起默认不筛】——实测它只是
+    # 「安静程度」的弱代理：在低波动组里首板与否几乎无差别(T+10 -0.024 vs
+    # -0.030)，真正起作用的是 vol20。
     first_board: Mapped[Optional[bool]] = mapped_column(
-        Boolean, index=True, comment="启动段前60日无涨停"
+        Boolean, index=True, comment="启动段前60日无涨停(弱代理,默认不筛)"
+    )
+    # 启动前20日 pct_chg 标准差 —— 「底部横盘」的直接度量。
+    # 【实测这是最强的入池筛选维度】分档单调且区分度是 first_board 的 3.6 倍：
+    #   <1.5  T+10 +0.714%(全表唯一为正)  |  >=4.0  T+10 -0.739%
+    # 002285 世联行 vol20=2.805(整个8月±5%来回抽)正是靠 first_board 漏进来的，
+    # 它前60日确实无涨停，但一点也不安静。
+    vol20: Mapped[Optional[float]] = mapped_column(
+        Float, index=True, comment="启动前20日涨跌幅标准差(越小越安静)"
     )
 
     # ---- 第二阶段：回踩（触发入池）----
-    pullback_date: Mapped[date] = mapped_column(Date, nullable=False, index=True,
-                                                comment="回踩确认日=入池日")
-    pullback_close: Mapped[float] = mapped_column(Price, comment="回踩日原始收盘")
+    # 【可空】状态机下 armed/missed/failed/expired 的行从未发生回踩，
+    # 这两列为 NULL。只有 triggered/hit/settled 才有值。
+    pullback_date: Mapped[Optional[date]] = mapped_column(
+        Date, index=True, comment="回踩确认日=报警日(未触发则空)"
+    )
+    pullback_close: Mapped[Optional[float]] = mapped_column(
+        Price, comment="回踩日原始收盘(未触发则空)"
+    )
     # 距启动日收盘的回撤%（负值=已回落）。连板时此值可能为正——价格仍高于
     # 启动日收盘，但已从连板段高点回落，故另记 drawdown_from_peak。
     drawdown: Mapped[Optional[float]] = mapped_column(Float, comment="相对启动日收盘%")
@@ -863,9 +877,33 @@ class WatchPullback(Base, TimestampMixin):
     )
 
     # ---- 跟踪与结算 ----
-    # watching=跟踪中 / hit=窗口内再次涨停 / expired=窗口结束未涨停
+    # ---- 状态机（2026-09-13 改造）----
+    # 旧模型是「扫描时回头看，找到回踩就入池」，导致 28.3% 的记录在报警时
+    # 第二波【已经走完】——回踩虽然发生了，但中间价格早已冲破 peak_close。
+    # 改为逐日推进的状态机：段末次日即登记 armed，此后每日判定一次。
+    #
+    #   armed     段末已登记，等待回踩（尚未报警）
+    #   triggered 回踩到位 → 【这才是要报给用户的状态】
+    #   missed    收盘突破 peak_close → 第二波已启动，报了也晚，作废
+    #   failed    跌破启动段首日开盘价 → 启动失败，作废
+    #   expired   超过 PB_MAX_DAYS 仍未回踩 → 形态走坏，作废
+    #   hit       triggered 之后在 HORIZON 窗口内再次涨停（观测标签）
+    #   settled   triggered 之后窗口走完未涨停（观测标签）
+    #   legacy    2026-09-13 之前用旧「回头看」口径产生的存量行
+    #
+    # 【全部入表不删除】——missed/failed/expired 是 triggered 的对照组，
+    # 删了就无法回答「过滤对不对」。与 watch_pool「标记而非删除」先例一致。
     status: Mapped[str] = mapped_column(
-        String(12), nullable=False, default="watching", index=True
+        String(12), nullable=False, default="armed", index=True
+    )
+    # 登记日 = 启动段末日的次一交易日。此时尚未报警，只是进入待回踩观察。
+    armed_date: Mapped[Optional[date]] = mapped_column(
+        Date, index=True, comment="登记待回踩日(段末次日)"
+    )
+    # 收盘首次突破 peak_close 的日期 → 第二波已启动的客观证据。
+    # 记录下来而非仅置状态，便于事后分析「漏掉的那些后来怎么走的」。
+    peak_broken_date: Mapped[Optional[date]] = mapped_column(
+        Date, comment="收盘突破启动段峰值日(=第二波已启动)"
     )
     hit_date: Mapped[Optional[date]] = mapped_column(Date)
     hit_days: Mapped[Optional[int]] = mapped_column(Integer, comment="距回踩日交易日数")

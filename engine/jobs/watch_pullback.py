@@ -12,12 +12,19 @@
                  - 累计涨幅 = 段首【开盘】→ 段末【收盘】
                  - 涨停不再是必要条件，它只是 streak_days=1 的特例(entry_kind
                    =limitup)，两种口径共存一表供事后对比
-    阶段二 回踩：【段末之后】2~15 个交易日内，收盘【首次】落入 MA10 ±3%
-                且相对启动段最高收盘至少回落 1%（否则是滞涨不是回调）
-                且收盘 >= 启动段首日开盘价（破了说明启动失败，不入池）
+    阶段二 回踩：段末次日登记 armed，此后【逐日推进状态机】，先到先决：
+                 收盘 > 启动段峰值      → missed   （第二波已启动，报了也晚）
+                 跌破段首开盘价         → failed   （启动失败）
+                 回踩入 MA10±3% 且
+                   相对峰值回落>=1%     → triggered（报警，这才是要看的）
+                 超过 15 日未回踩       → expired  （形态走坏）
 
     跳过段末后第1日：次日即触 MA10 的多为一日游冲高回落，不是回调确认。
     回踩窗口从【整段涨势结束后】起算——涨势没走完就不算回调。
+
+    **为什么必须是状态机**：旧版「扫描时回头找第一个满足 MA10 的日子」不检查
+    中间是否已冲破峰值，导致 28.3% 的记录报警时第二波【已经走完】，提示价值
+    为零。用户原话：「我的目的就是为了报警第一次的上升然后跟随第二次」。
 
 标签：回踩后 10 个交易日内是否再次涨停 + T+1/3/5/10 收益率。
 两个标签都记，因为本形态未经回测，不预设「只有涨停才算成功」。
@@ -118,62 +125,81 @@ def candle(op: float | None, cl: float | None) -> str:
     return "flat"
 
 
-def _find_pullback(qm: dict, dates: list[date], se: int, last_i: int,
-                   peak_close: float, bo_open: float | None) -> dict | None:
-    """在启动段结束后的窗口内找回踩确认日；找不到返回 None。
+def advance_armed(qm: dict, dates: list[date], se: int, last_i: int,
+                  peak_close: float, bo_open: float | None) -> dict:
+    """从段末次日起逐日推进状态机，返回最终判定。
 
-    窗口 = 段末后第 PB_MIN_DAYS ~ PB_MAX_DAYS 个交易日，取【首个】同时满足：
-        1. 收盘落入 MA10 ±MA_TOL%          ← 主判据
-        2. 相对启动段最高收盘回落 ≥ MIN_DRAWDOWN%  ← 排除滞涨假回踩
-        3. 收盘 ≥ 启动段首日开盘价          ← 破了=启动失败，直接放弃
+    【与旧 _find_pullback 的本质差别】旧版只找「第一个满足 MA10 条件的日子」，
+    从不看中间价格是否已冲破 peak_close——于是回踩虽真实发生，但第二波早已
+    走完，报警时已晚（实测占 28.3%）。新版按时间顺序逐日判定，谁先发生算谁。
 
-    均线只用截至当日（含当日）的收盘算，无未来信息。
+    判定优先级 = 时间顺序。同一天内的顺序：
+        1. 突破 peak_close → missed （第二波启动，最优先：报了也没用）
+        2. 跌破段首开盘价   → failed （启动失败）
+        3. 回踩到位        → triggered
+    突破与跌破互斥（一个向上一个向下），不会同日冲突。
+
+    返回 {"status": ..., 可选的回踩字段...}；status 必为五态之一。
     """
-    for n in range(PB_MIN_DAYS, PB_MAX_DAYS + 1):
+    for n in range(1, PB_MAX_DAYS + 1):
         pj = se + n
         if pj > last_i:
-            break
+            # 行情还没走到 → 保持 armed，后续交易日继续推进
+            return {"status": "armed", "peak_close": peak_close}
         pd_ = dates[pj]
         if pd_ not in qm:
             continue
-        pb_close = qm[pd_][0]
-        if pb_close is None:
+        cl = qm[pd_][0]
+        if cl is None:
+            continue
+
+        # ① 收盘突破启动段峰值 → 第二波已启动，此后再回踩也没有提示价值
+        if cl > peak_close:
+            return {"status": "missed", "peak_broken_date": pd_,
+                    "peak_close": peak_close}
+
+        # ② 跌破启动段首日开盘价 → 启动失败
+        if bo_open and cl < bo_open:
+            return {"status": "failed", "peak_close": peak_close}
+
+        # ③ 回踩判定（段末次日即第1日，但前 PB_MIN_DAYS-1 日不接受触发——
+        #    次日就触 MA10 的多是一日游冲高回落，不是回调确认）
+        if n < PB_MIN_DAYS:
             continue
         closes = [qm[dates[j2]][0] for j2 in range(max(0, pj - 25), pj + 1)
                   if dates[j2] in qm and qm[dates[j2]][0] is not None]
         ma10 = _ma(closes, MA_WINDOW)
         if ma10 is None or ma10 <= 0:
             continue
-        d10 = (pb_close / ma10 - 1) * 100
+        d10 = (cl / ma10 - 1) * 100
         if abs(d10) > MA_TOL:
-            continue                      # 还没回到 MA10 附近
-        # 必须确实回调过：排除「价格横住、均线自己抬上来追平」的假形态。
-        # 基准是启动段最高收盘（多根阳线时≠段首收盘），否则整段涨势会被误杀。
-        if (pb_close / peak_close - 1) * 100 > -MIN_DRAWDOWN:
             continue
-        # 跌破启动段首日开盘价 → 启动失败，不是健康回调
-        if bo_open and pb_close < bo_open:
-            return None
+        # 必须确实回调过：排除「价格横住、均线自己抬上来追平」的假形态
+        if (cl / peak_close - 1) * 100 > -MIN_DRAWDOWN:
+            continue
+
         ma5, ma20 = _ma(closes, 5), _ma(closes, 20)
         pb_amt = qm[pd_][2]
-        bo_close = qm[dates[se]][0]
-        bo_amt_ref = qm[dates[se]][2]
-        return dict(
-            pullback_date=pd_,
-            pullback_close=pb_close,
-            # 相对启动段【末日】收盘的回撤（多根阳线时段首已无参考意义）
-            drawdown=round((pb_close / bo_close - 1) * 100, 4)
-            if bo_close else None,
-            drawdown_from_peak=round((pb_close / peak_close - 1) * 100, 4),
-            peak_close=peak_close,
-            dist_ma5=round((pb_close / ma5 - 1) * 100, 4) if ma5 else None,
-            dist_ma10=round(d10, 4),
-            dist_ma20=round((pb_close / ma20 - 1) * 100, 4) if ma20 else None,
-            pullback_days=n,              # 距【段末】的交易日数
-            pullback_vol_ratio=(round(pb_amt / bo_amt_ref, 4)
-                                if pb_amt and bo_amt_ref else None),
-        )
-    return None
+        se_close = qm[dates[se]][0]
+        se_amt = qm[dates[se]][2]
+        return {
+            "status": "triggered",
+            "pullback_date": pd_,
+            "pullback_close": cl,
+            "drawdown": (round((cl / se_close - 1) * 100, 4)
+                         if se_close else None),
+            "drawdown_from_peak": round((cl / peak_close - 1) * 100, 4),
+            "peak_close": peak_close,
+            "dist_ma5": round((cl / ma5 - 1) * 100, 4) if ma5 else None,
+            "dist_ma10": round(d10, 4),
+            "dist_ma20": round((cl / ma20 - 1) * 100, 4) if ma20 else None,
+            "pullback_days": n,
+            "pullback_vol_ratio": (round(pb_amt / se_amt, 4)
+                                   if pb_amt and se_amt else None),
+        }
+
+    # 窗口走满仍未回踩到位
+    return {"status": "expired", "peak_close": peak_close}
 
 
 def detect_new_entries(session: Session, lookback_days: int = 1) -> int:
@@ -339,6 +365,19 @@ def detect_new_entries(session: Session, lookback_days: int = 1) -> int:
                     round(bo_amt / (sum(prev_amts) / len(prev_amts)), 4)
                     if bo_amt and prev_amts and sum(prev_amts) > 0 else None
                 )
+                # ---- 启动前20日波动率：「底部横盘」的直接度量 ----
+                # 【实测最强筛选维度】<1.5 T+10 +0.714%(全表唯一为正) →
+                # >=4.0 -0.739%，单调；区分度是 first_board 的 3.6 倍。
+                # 只用启动段【之前】的 pct_chg，无未来函数。
+                pre_pcts = [qm[dates[j2]][3]
+                            for j2 in range(max(0, i - 20), i)
+                            if dates[j2] in qm and qm[dates[j2]][3] is not None]
+                vol20 = None
+                if len(pre_pcts) >= 10:
+                    m = sum(pre_pcts) / len(pre_pcts)
+                    var = sum((x - m) ** 2 for x in pre_pcts) / (len(pre_pcts) - 1)
+                    vol20 = round(var ** 0.5, 4)
+
                 # 启动前横盘天数（只记录，IC≈0 不作条件）
                 flat = 0
                 for j2 in range(i - 1, max(-1, i - LOOKBACK_LOW) - 1, -1):
@@ -347,17 +386,20 @@ def detect_new_entries(session: Session, lookback_days: int = 1) -> int:
                         break
                     flat += 1
 
-                pb = _find_pullback(qm, dates, se, last_i, peak_close, bo_open)
-                if pb is None:
-                    i = se + 1
-                    continue
-                if (pb["pullback_date"] not in target_pb_dates
-                        and lookback_days <= 1):
-                    i = se + 1
-                    continue
+                res = advance_armed(qm, dates, se, last_i, peak_close, bo_open)
+                st = res.pop("status")
+                # 增量模式只收「今天刚发生状态变化」的，避免重复处理历史。
+                # armed 的判定日是段末次日；其余状态按各自事件日。
+                if lookback_days <= 1:
+                    evt = (res.get("pullback_date")
+                           or res.get("peak_broken_date")
+                           or (dates[se + 1] if se + 1 <= last_i else None))
+                    if evt is not None and evt not in target_pb_dates:
+                        i = se + 1
+                        continue
 
-                pbi = idx[pb["pullback_date"]]
-                expire_i = pbi + HORIZON
+                pb_date = res.get("pullback_date")
+                expire_i = (idx[pb_date] + HORIZON) if pb_date else None
                 rows.append(dict(
                     code=code,
                     name=bs.name if bs else "",
@@ -377,10 +419,15 @@ def detect_new_entries(session: Session, lookback_days: int = 1) -> int:
                     streak_gain=round(gain_streak, 4),
                     streak_end_date=dates[se],
                     first_board=not prior_lu,
-                    status="watching",
-                    expire_date=(dates[expire_i] if expire_i < len(dates)
+                    vol20=vol20,
+                    status=st,
+                    armed_date=(dates[se + 1] if se + 1 <= last_i else None),
+                    # 窗口末日：只有 triggered 才有跟踪窗口；未走满则留空(NULL)。
+                    # 不可 clamp 到最后已知交易日——会让刚触发的票被误判到期。
+                    expire_date=(dates[expire_i]
+                                 if expire_i is not None and expire_i < len(dates)
                                  else None),
-                    **pb,
+                    **res,
                 ))
                 i = se + 1
         q.clear()
@@ -389,6 +436,17 @@ def detect_new_entries(session: Session, lookback_days: int = 1) -> int:
     if not rows:
         log.info("无新增入池 (启动候选%d)", n_cand)
         return 0
+
+    # 统一各行的键集合：状态机下不同状态带的字段不同（triggered 有回踩字段、
+    # missed 有 peak_broken_date、armed 两者皆无）。bulk_upsert 用所有行的
+    # 键【并集】推 update_cols，但 .values(chunk) 是按【首行】编译列的——
+    # 键集合不齐会报 "explicitly rendered as a boundparameter"。故补齐为 None。
+    all_keys: set[str] = set()
+    for r in rows:
+        all_keys.update(r.keys())
+    for r in rows:
+        for k in all_keys:
+            r.setdefault(k, None)
 
     if rows:
         bulk_upsert(session, WatchPullback, rows)
@@ -401,11 +459,13 @@ def track_daily(session: Session) -> int:
 
     标签=回踩后10日内再次涨停；同时记 T+1/3/5/10 收益率与窗口内最大收益。
     """
+    # 只跟踪 triggered（已报警）的票。armed 尚未报警、missed/failed/expired
+    # 已作废，都不需要 T+N 结算。
     pools = list(session.scalars(
-        select(WatchPullback).where(WatchPullback.status == "watching")
+        select(WatchPullback).where(WatchPullback.status == "triggered")
     ).all())
     if not pools:
-        log.info("池内无跟踪中标的")
+        log.info("池内无已触发标的")
         return 0
 
     dates = trade_dates(session)
@@ -505,7 +565,9 @@ def track_daily(session: Session) -> int:
             p.status = "hit"
             p.hit_date, p.hit_days = hit_date, hit_days
         elif p.expire_date is not None and latest >= p.expire_date:
-            p.status = "expired"
+            # settled 而非 expired——expired 在状态机里专指「未等到回踩」，
+            # 与「已回踩但窗口内没再涨停」是两回事，不可混用同一个词。
+            p.status = "settled"
 
     if daily_rows:
         bulk_upsert(session, WatchPullbackDaily, daily_rows)

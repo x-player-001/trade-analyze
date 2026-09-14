@@ -565,7 +565,8 @@ class PullbackOut(ORMModel):
     streak_days: Optional[int] = None            # 启动段阳线根数
     streak_gain: Optional[float] = None          # 启动段累计涨幅%(段首开→段末收)
     streak_end_date: Optional[date] = None       # 启动段末日(回踩窗口起算点)
-    first_board: Optional[bool] = None           # 启动段前60日无涨停(观测字段)
+    first_board: Optional[bool] = None           # 启动段前60日无涨停(弱代理,默认不筛)
+    vol20: Optional[float] = None                # 启动前20日涨跌幅标准差(越小越安静)
     # ---- 阶段二：回踩(=入池日) ----
     pullback_date: date
     pullback_close: Optional[float] = None
@@ -577,8 +578,13 @@ class PullbackOut(ORMModel):
     dist_ma20: Optional[float] = None
     pullback_days: Optional[int] = None          # 启动→回踩交易日数
     pullback_vol_ratio: Optional[float] = None   # 回踩日额比vs启动日
-    # ---- 跟踪与结算 ----
-    status: str                                  # watching / hit / expired
+    # ---- 状态机与结算 ----
+    # armed=已登记待回踩(未报警) / triggered=回踩到位(**要看的就是这个**)
+    # missed=第二波已启动作废 / failed=跌破段首开盘作废 / expired=未等到回踩
+    # hit=触发后窗口内再涨停 / settled=触发后窗口走完 / legacy=旧口径存量
+    status: str
+    armed_date: Optional[date] = None            # 登记待回踩日(段末次日)
+    peak_broken_date: Optional[date] = None      # 突破启动段峰值日(=第二波已启动)
     hit_date: Optional[date] = None
     hit_days: Optional[int] = None
     expire_date: Optional[date] = None
@@ -594,6 +600,21 @@ class PullbackOut(ORMModel):
     last_dist_ma10: Optional[float] = None
     days_in_pool: Optional[int] = None
     track: List[PullbackTrackOut] = []           # 仅详情接口填充
+
+    # ---- 概念/题材热度（与情绪热点模块关联，用于排前与标记）----
+    # 该票所属概念中，最近窗口内最热的几个（按概念当日涨幅排序）
+    hot_concepts: List[str] = []
+    # 命中的当日热门题材（来自 theme_daily 涨停原因词频，如「光伏玻璃」）
+    hot_themes: List[str] = []
+    # 所属最强概念的当日涨幅%（None=该概念当日无快照）
+    top_concept_pct: Optional[float] = None
+    # 所属最强概念的成交额占比%——实测比涨幅更能反映资金聚集
+    top_concept_share: Optional[float] = None
+    # 命中题材的最高连续上榜天数：>=3 基本是主线，=1 多为一日游
+    theme_consec_days: Optional[int] = None
+    # 热度综合分 0~100。仅用于**排序展示**，不参与选股决策——
+    # 概念数据只有 2 个交易日历史，样本远不足以验证其预测力。
+    hot_score: Optional[float] = None
 
 
 class PullbackStatsOut(BaseModel):
@@ -615,5 +636,15 @@ class PullbackStatsOut(BaseModel):
     by_boards: Dict[str, float] = {}
     # 按启动口径分组：limitup(单根涨停) vs streak(多根连续阳线)
     by_entry_kind: Dict[str, float] = {}
+    # 状态机各状态的条数分布（armed/triggered/missed/failed/expired/...）
+    by_status: Dict[str, int] = {}
+    # 当前已报警的票里，命中热门概念/题材的条数
+    hot_concept_hits: Optional[int] = None
+    hot_theme_hits: Optional[int] = None
+    # 概念数据覆盖的交易日数——太少则热度排序不可信，前端应据此提示
+    concept_days_available: Optional[int] = None
+    # hot_concept_hits / hot_theme_hits 的分母（近期报警票数），
+    # 没有它那两个绝对值无法解读
+    hot_stats_base: Optional[int] = None
     note: str = ("本形态尚未回测验证，命中率无历史基准可比；"
                  "参考：watch_pool 30日内再涨停 随机基准 19.87%")
