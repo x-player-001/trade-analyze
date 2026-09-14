@@ -30,6 +30,7 @@ from api.schemas.responses import (
 from common.db import get_session
 from common.models import (
     ConceptDaily,
+    WatchFavorite,
     StockConcept,
     ThemeDaily,
     WatchPullback,
@@ -248,6 +249,10 @@ def pullback_list(
     only_hot: bool = Query(
         False, description="只看命中热门概念/题材的（hot_score 非空）"
     ),
+    only_fav: bool = Query(
+        False,
+        description="只看已收藏的票（收藏按代码、跨池共享，见 /api/favorite）",
+    ),
     first_board_only: bool = Query(
         False,
         description="只看启动段前60日无涨停的（**默认关**）。"
@@ -304,6 +309,10 @@ def pullback_list(
         stmt = stmt.where(WatchPullback.pullback_date >= since)
     if max_gain_from_low is not None:
         stmt = stmt.where(WatchPullback.gain_from_low <= max_gain_from_low)
+    if only_fav:
+        # 收藏按【股票代码】，与入池事件无关——同一只票多次启动都会命中。
+        # 用 IN 子查询而非 join，避免收藏表与池子多对一时放大行数。
+        stmt = stmt.where(WatchPullback.code.in_(select(WatchFavorite.code)))
     if exclude_broke:
         # 【默认剔除破位】用户 2026-09-14 要求前端不返回这类。
         # 破位=回踩入池【之后】又跌破启动段首日开盘价,形态已失效。

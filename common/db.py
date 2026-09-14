@@ -43,3 +43,23 @@ def get_session() -> Iterator[Session]:
         yield session
     finally:
         session.close()
+
+
+def get_write_session() -> Iterator[Session]:
+    """FastAPI 写入会话：正常结束时提交，异常回滚。
+
+    **只用于收藏接口**（watch_favorite 是唯一允许 API 写的表）。
+    业务数据（行情/因子/池子）仍由 engine 独占写入，路由里一律用 get_session。
+
+    与 get_session 分开而不是给它加 commit：读接口意外产生的脏数据不该被
+    静默提交，保持读路径永不写库这个性质本身就是一道防线。
+    """
+    session = SessionLocal()
+    try:
+        yield session
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()

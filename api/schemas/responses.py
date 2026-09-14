@@ -648,3 +648,25 @@ class PullbackStatsOut(BaseModel):
     hot_stats_base: Optional[int] = None
     note: str = ("本形态尚未回测验证，命中率无历史基准可比；"
                  "参考：watch_pool 30日内再涨停 随机基准 19.87%")
+
+# ---------------- 收藏（唯一可写的一组接口） ----------------
+class FavoriteIn(BaseModel):
+    """新增/更新收藏的请求体。"""
+    code: str
+    name: Optional[str] = None      # 不传则由服务端从池子/基础信息补全
+    note: Optional[str] = None      # 备注：为什么关注它
+
+
+class FavoriteOut(ORMModel):
+    """一条收藏记录。
+
+    按【股票代码】收藏、跨池共享——收藏的是「这只票」而非「某次入池事件」，
+    故同一只票多次启动也只有一条。
+    """
+    id: int
+    code: str
+    name: str
+    note: Optional[str] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+

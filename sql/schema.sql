@@ -400,3 +400,21 @@ CREATE TABLE IF NOT EXISTS watch_pullback_daily (
   KEY idx_wpbd_code (code),
   KEY idx_wpbd_date (trade_date)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='突破回踩池每日跟踪';
+
+-- ---------------------------------------------------------------------------
+-- 收藏：本项目唯一一张【API 可写】的表。
+-- 架构原则是「engine 写、api 只读」，但收藏是用户行为数据、不由跑批产生，
+-- 故约定收窄为：业务数据只读、用户数据(仅本表)可写。
+-- 按股票代码收藏、跨池共享；不区分用户(当前单人使用且 API 无认证)。
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS watch_favorite (
+  id         BIGINT      NOT NULL AUTO_INCREMENT,
+  code       VARCHAR(10) NOT NULL,
+  name       VARCHAR(32) NOT NULL DEFAULT '' COMMENT '收藏时的名称快照',
+  note       VARCHAR(255) COMMENT '备注:为什么关注它',
+  created_at DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_fav_code (code),
+  KEY idx_fav_code (code)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='人工收藏(唯一API可写表)';

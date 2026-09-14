@@ -1,6 +1,8 @@
 """API 服务入口：uvicorn api.main:app --host 0.0.0.0 --port 8000
 
-只读服务：查询选股快照/因子/验证/大盘状态，写入全部由 engine 跑批完成。
+读为主：查询选股快照/因子/验证/大盘状态，业务数据写入全部由 engine 跑批完成。
+唯一例外是收藏(/api/favorite)——用户行为数据不由跑批产生，故允许 API 写入
+watch_favorite 一张表；其余表在 API 侧严格只读。
 OpenAPI 文档: /docs (Swagger) /redoc
 """
 from __future__ import annotations
@@ -11,6 +13,7 @@ from sqlalchemy import text
 
 from api.routers import (
     concept,
+    favorite,
     hotspot,
     lowvol,
     market,
@@ -48,6 +51,7 @@ app.include_router(sentiment.router)
 app.include_router(hotspot.router)
 app.include_router(concept.router)
 app.include_router(pullback.router)
+app.include_router(favorite.router)
 
 
 @app.get("/health", tags=["meta"], summary="健康检查")

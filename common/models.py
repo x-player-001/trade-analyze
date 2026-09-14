@@ -943,3 +943,36 @@ class WatchPullbackDaily(Base):
     amount_ratio: Mapped[Optional[float]] = mapped_column(Float, comment="额比vs回踩日")
     dist_ma10: Mapped[Optional[float]] = mapped_column(Float, comment="距MA10 %")
     is_limit_up: Mapped[bool] = mapped_column(Boolean, default=False)
+
+# ---------------------------------------------------------------------------
+# 收藏：唯一一张【API 可写】的表
+# ---------------------------------------------------------------------------
+class WatchFavorite(Base, TimestampMixin):
+    """人工收藏的关注标的。
+
+    **本项目唯一允许 API 写入的表。** 架构原则是「engine 写、api 只读」
+    （见 README 架构图），但收藏是**用户行为数据**，不由跑批产生，
+    放 engine 里无从谈起。故约定收窄为：
+        业务数据（行情/因子/池子）只读 —— 仍由 engine 独占写入
+        用户数据（收藏）             可写 —— 仅限本表
+
+    **按股票代码收藏、跨池共享**（用户 2026-09-15 定）：收藏的是「这只票」，
+    不是「某次入池事件」。三个监控池（回踩/首板/放量）共用同一份收藏，
+    同一只票多次启动也只有一条收藏记录。
+
+    不区分用户：当前系统单人使用且 API 无认证机制，加 user_id 只是凭空多一列。
+    将来真要多用户，加列 + 改唯一键即可，不影响已有数据。
+    """
+
+    __tablename__ = "watch_favorite"
+    __table_args__ = (
+        UniqueConstraint("code", name="uq_fav_code"),
+    )
+
+    id: Mapped[int] = mapped_column(BigIntPK, primary_key=True, autoincrement=True)
+    code: Mapped[str] = mapped_column(String(10), nullable=False, index=True)
+    # 收藏时的名称快照。股票会改名(ST/摘帽/重组)，留快照便于回看当时叫什么。
+    name: Mapped[str] = mapped_column(String(32), nullable=False, default="")
+    # 人工备注：为什么关注它
+    note: Mapped[Optional[str]] = mapped_column(String(255), comment="备注")
+
