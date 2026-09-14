@@ -421,7 +421,9 @@ def detect_new_entries(session: Session, lookback_days: int = 1) -> int:
                     first_board=not prior_lu,
                     vol20=vol20,
                     status=st,
-                    armed_date=(dates[se + 1] if se + 1 <= last_i else None),
+                    # 【取段末日本身，不可取 dates[se+1]】刚登记 armed 时段末
+                    # 往往就是最后一个已知交易日，se+1 不存在 → 恒为 NULL。
+                    armed_date=dates[se],
                     # 窗口末日：只有 triggered 才有跟踪窗口；未走满则留空(NULL)。
                     # 不可 clamp 到最后已知交易日——会让刚触发的票被误判到期。
                     expire_date=(dates[expire_i]
@@ -452,6 +454,82 @@ def detect_new_entries(session: Session, lookback_days: int = 1) -> int:
         bulk_upsert(session, WatchPullback, rows)
     log.info("新入池 %d 只 (启动候选%d)", len(rows), n_cand)
     return len(rows)
+
+
+def advance_pending(session: Session) -> int:
+    """每日推进 armed 行的状态机。
+
+    【为什么必须单独一步】detect_new_entries 用 (code, breakout_date) 去重，
+    armed 行的键已在表里，下次扫描会被 existing 直接跳过；而 track_daily 只
+    处理 triggered。结果是 **armed 行一旦写入就永远冻结**——实测 09-08~09-11
+    登记的 156 条在 09-14 跑完后仍是 armed，其中雪天盐业段末 08-28 已过窗口
+    12 个交易日，早该 expired 或 triggered。这正是「今天没有回踩数据」的根因：
+    今日的回踩确认本应来自几天前 armed 的那批，而它们从未被重新评估。
+
+    复用 advance_armed()，判据与入池时完全一致。
+    """
+    pools = list(session.scalars(
+        select(WatchPullback).where(WatchPullback.status == "armed")
+    ).all())
+    if not pools:
+        log.info("无待推进(armed)标的")
+        return 0
+
+    dates = trade_dates(session)
+    idx = {d: i for i, d in enumerate(dates)}
+    last_i = len(dates) - 1
+
+    codes = sorted({p.code for p in pools})
+    min_se = min(p.streak_end_date for p in pools if p.streak_end_date)
+    mi = idx.get(min_se, 0)
+    # 均线需要段末前 25 个交易日
+    load_start = dates[max(0, mi - 25)]
+
+    q: dict[str, dict[date, tuple]] = {}
+    for k in range(0, len(codes), CODE_BATCH):
+        batch = codes[k : k + CODE_BATCH]
+        for c, d, op, cl, am, pct in session.execute(
+            select(DailyQuote.code, DailyQuote.trade_date, DailyQuote.raw_open,
+                   DailyQuote.raw_close, DailyQuote.amount,
+                   DailyQuote.pct_chg).where(
+                DailyQuote.code.in_(batch),
+                DailyQuote.trade_date >= load_start,
+                DailyQuote.raw_close.isnot(None),
+            )
+        ).all():
+            q.setdefault(c, {})[d] = (
+                float(cl) if cl is not None else None,
+                float(op) if op is not None else None,
+                float(am) if am is not None else None,
+                float(pct) if pct is not None else None,
+            )
+
+    changed = 0
+    for p in pools:
+        qm = q.get(p.code, {})
+        se = idx.get(p.streak_end_date) if p.streak_end_date else None
+        if se is None or not qm:
+            continue
+        peak = float(p.peak_close) if p.peak_close is not None else None
+        if peak is None:
+            continue
+        bo_open = float(p.breakout_open) if p.breakout_open is not None else None
+        res = advance_armed(qm, dates, se, last_i, peak, bo_open)
+        st = res.pop("status")
+        if st == "armed":
+            continue                      # 行情还没走到，保持等待
+        p.status = st
+        for key, val in res.items():
+            setattr(p, key, val)
+        if st == "triggered" and p.pullback_date is not None:
+            pi = idx.get(p.pullback_date)
+            if pi is not None and pi + HORIZON < len(dates):
+                p.expire_date = dates[pi + HORIZON]
+        changed += 1
+
+    q.clear()
+    log.info("推进 %d 条 armed，状态变更 %d 条", len(pools), changed)
+    return changed
 
 
 def track_daily(session: Session) -> int:

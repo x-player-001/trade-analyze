@@ -25,6 +25,7 @@ from engine.jobs.fetch_sentiment import run as fetch_sentiment
 from engine.jobs.watch_lowvol import detect_new_entries as detect_lowvol
 from engine.jobs.watch_lowvol import track_and_settle as settle_lowvol
 from engine.jobs.watch_pool import detect_new_entries, track_daily
+from engine.jobs.watch_pullback import advance_pending as advance_pullback
 from engine.jobs.watch_pullback import detect_new_entries as detect_pullback
 from engine.jobs.watch_pullback import track_daily as track_pullback
 from engine.validation.validator import backfill_validations
@@ -89,6 +90,10 @@ def main() -> None:
             settle_lowvol(s)                            # 放量池:结算T+N收益
         with session_scope() as s:
             detect_pullback(s, lookback_days=1)         # 形态3:突破回踩
+        with session_scope() as s:
+            # 【必须有这步】armed 行的键已在表里,detect 会被 existing 跳过,
+            # track_daily 又只处理 triggered——不单独推进就永远冻结。
+            advance_pullback(s)                         # 回踩池:推进armed
         with session_scope() as s:
             track_pullback(s)                           # 回踩池:结算涨停+收益
     except Exception:

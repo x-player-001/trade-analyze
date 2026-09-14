@@ -15,6 +15,7 @@ from engine.jobs.watch_pullback import (
     MIN_STREAK_GAIN,
     PB_MAX_DAYS,
     advance_armed,
+    advance_pending,
     candle,
     detect_new_entries,
     track_daily,
@@ -466,3 +467,56 @@ def test_track_daily_ignores_non_triggered(session):
     track_daily(session)
     session.commit()
     assert p.status == "missed"            # 未被改成 hit/settled
+
+
+# ============ armed 行必须被逐日推进（2026-09-14 线上冻结 bug） ============
+
+def test_armed_row_advances_on_later_data(session, client=None):
+    """armed 行在后续行情到来后必须被推进，不能永远冻结。
+
+    线上真 bug：detect_new_entries 用 (code, breakout_date) 去重，armed 行的
+    键已在表里会被 existing 跳过；track_daily 又只处理 triggered。结果 09-08~
+    09-11 登记的 156 条到 09-14 跑完仍是 armed，其中有的段末已过窗口 12 天。
+    这正是「今日无回踩数据」的根因——今日的回踩本应来自几天前 armed 的那批。
+    """
+    # 第一次：只给到段末，行情不够判定 → armed
+    # 注意长度要越过 detect_new_entries 的守卫(LOOKBACK_LOW+PB_MAX_DAYS)，
+    # 否则直接 return 0，一行都造不出来。
+    PAD = [0.1, -0.1] * 5
+    _seed(session, "600001", "main", PAD + FLAT + STREAK)
+    detect_new_entries(session, lookback_days=40)
+    session.commit()
+    p = session.scalars(select(WatchPullback)).one()
+    assert p.status == "armed"
+    assert p.armed_date is not None          # 不可为 NULL
+    assert p.armed_date == p.streak_end_date
+
+    # 补上后续行情（回落到 MA10）后推进 → 应变为 triggered
+    base = PAD + FLAT + STREAK
+    ds = _days(len(base) + 6)
+    close = 10.0
+    for pct in base:
+        close = round(close * (1 + pct / 100), 3)
+    for d, pct in zip(ds[len(base):], [-1.5, -1.5, -1.2, -1.0, -0.5, 0.2]):
+        prev = close
+        close = round(prev * (1 + pct / 100), 3)
+        session.add(DailyQuote(
+            code="600001", trade_date=d,
+            raw_open=prev, raw_high=max(prev, close), raw_low=min(prev, close),
+            raw_close=close, volume=1e6, amount=1e8, pct_chg=pct,
+        ))
+    session.commit()
+
+    changed = advance_pending(session)
+    session.commit()
+    assert changed == 1
+    assert p.status in ("triggered", "missed", "failed", "expired")
+
+
+def test_advance_pending_leaves_armed_when_no_new_data(session):
+    """行情没有新增时，armed 保持 armed，不应误判。"""
+    _seed(session, "600001", "main", [0.1, -0.1] * 5 + FLAT + STREAK)
+    detect_new_entries(session, lookback_days=40)
+    session.commit()
+    assert advance_pending(session) == 0
+    assert session.scalars(select(WatchPullback)).one().status == "armed"
