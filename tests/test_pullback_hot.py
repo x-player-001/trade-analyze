@@ -324,3 +324,29 @@ def test_vol20_is_default_filter(session, client):
 
     # vol20 要如实返回给前端
     assert rows[0]["vol20"] == pytest.approx(1.2, abs=0.01)
+
+
+def test_broke_excluded_by_default(session, client):
+    """破位票【默认不返回】——用户 2026-09-14 要求。
+
+    破位 = 回踩入池【之后】又跌破启动段首日开盘价，形态已失效。
+    实测破位组 T+10 −7.74% vs 未破位 +4.32%、命中率 7.49% vs 14.61%，
+    是全池区分度最大的单一维度（占已报警的 40.6%）。
+
+    【与 watch_pool 先例的区别】那边「删除会误杀 36.5% 命中票」说的是从池中
+    物理删除；这里只是默认不展示，数据仍在库、传 false 可取回。
+    """
+    ok = _pool(session, "600701", "完好票")
+    ok.broke_date = None
+    bad = _pool(session, "600702", "破位票")
+    bad.broke_date = date(2026, 9, 10)
+    bad.broke_days = 2
+    session.commit()
+
+    # 默认：只出未破位的
+    rows = client.get("/api/pullback?limit=10").json()
+    assert [r["code"] for r in rows] == ["600701"]
+
+    # 显式关掉：两条都在（数据没被删）
+    all_rows = client.get("/api/pullback?exclude_broke=false&limit=10").json()
+    assert {r["code"] for r in all_rows} == {"600701", "600702"}

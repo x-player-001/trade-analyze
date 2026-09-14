@@ -206,7 +206,7 @@ MA10 附近才提示。故 `breakout_date`（启动日）与 `pullback_date`（�
 | `only_hot` | 只看命中热门概念/题材的 |
 | `since` | 只看回踩日 >= 该日期的 |
 | `max_gain_from_low` | 距120日低点涨幅上限%（入池阈值 50，可再收紧） |
-| `exclude_broke` | 剔除已跌破启动日开盘价的（默认否，见下） |
+| `exclude_broke` | **默认 `true`**：剔除回踩入池后又跌破启动段首日开盘价的「破位」票。实测破位组 T+10 **−7.74%** vs 未破位 **+4.32%**、命中率 7.49% vs 14.61%，是全池区分度最大的单一维度（占 40.6%，平均回踩后第 4.7 日破位）。传 `false` 可取回，数据仍留库 |
 | `order_by` | `pullback_date`(默认) / `breakout_date` / `gain_from_low` / `drawdown` / `max_ret` |
 
 **关键字段**：
@@ -225,9 +225,11 @@ MA10 附近才提示。故 `breakout_date`（启动日）与 `pullback_date`（�
 > 有 edge。判断 edge 需与同期全市场基准对照（参考：watch_pool 的「30日内
 > 再涨停」随机基准是 19.87%，但本池窗口是 10 日，两者不可直接比）。
 
-**跌破启动日开盘价只打标不删除**（`broke_date`）：watch_pool 实测删除虽提升
-留存池命中率，但会误杀 36.5% 的命中票且删了无法再验证。前端可用
-`exclude_broke=true` 自行过滤。
+**跌破启动段首日开盘价只打标不删除**（`broke_date`）：数据永远留库，
+只是 **`exclude_broke` 默认 `true`，前端默认看不到**。要取回传 `false`。
+
+之所以「标记而非删除」：watch_pool 实测**物理删除**会误杀 36.5% 的命中票且
+删了无法再验证——那是删库，与这里的「默认不展示」是两回事。
 
 ### `GET /api/pullback/stats`
 

@@ -239,9 +239,11 @@ def pullback_list(
         None, description="距120日低点涨幅上限%（入池阈值50，可再收紧）"
     ),
     exclude_broke: bool = Query(
-        False,
-        description="剔除已跌破启动日开盘价的票"
-                    "（默认否：watch_pool 实测删除会误杀36.5%的命中票）",
+        True,
+        description="剔除回踩入池后又跌破启动段首日开盘价的票（**默认开**）。"
+                    "本池实测破位组 T+10 −7.74% vs 未破位 +4.32%、"
+                    "命中率 7.49% vs 14.61%，是全池区分度最大的单一维度。"
+                    "传 false 可取回（数据仍留库，只是不默认展示）",
     ),
     only_hot: bool = Query(
         False, description="只看命中热门概念/题材的（hot_score 非空）"
@@ -303,6 +305,10 @@ def pullback_list(
     if max_gain_from_low is not None:
         stmt = stmt.where(WatchPullback.gain_from_low <= max_gain_from_low)
     if exclude_broke:
+        # 【默认剔除破位】用户 2026-09-14 要求前端不返回这类。
+        # 破位=回踩入池【之后】又跌破启动段首日开盘价,形态已失效。
+        # 注意与 watch_pool 的先例不同:那边"删除会误杀36.5%命中票"指的是
+        # 从池中【物理删除】;这里只是默认不展示,数据仍在库、传 false 可取回。
         stmt = stmt.where(WatchPullback.broke_date.is_(None))
     # hot_score 是查询后在 Python 侧算的（概念热度来自另外两张表，
     # 不在 watch_pullback 上），故先按回踩日多取一些，再按热度重排。
