@@ -18,6 +18,7 @@ from api.routers import (
     lowvol,
     market,
     picks,
+    pool_limitup,
     pullback,
     quotes,
     sentiment,
@@ -58,6 +59,7 @@ app.include_router(hotspot.router)
 app.include_router(concept.router)
 app.include_router(pullback.router)
 app.include_router(favorite.router)
+app.include_router(pool_limitup.router)
 
 
 @app.get("/health", tags=["meta"], summary="健康检查")

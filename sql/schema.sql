@@ -418,3 +418,198 @@ CREATE TABLE IF NOT EXISTS watch_favorite (
   UNIQUE KEY uq_fav_code (code),
   KEY idx_fav_code (code)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='人工收藏(唯一API可写表)';
+
+
+-- ===========================================================================
+-- 以下几张表此前只由 ORM(common/init_db.py) 建、未同步进本文件，
+-- 导致「全新部署从 schema.sql 建库会缺表」。2026-09-15 从线上
+-- mysqldump --no-data 导出补齐，与生产表结构逐字一致。
+-- 【今后改表结构务必同步这里】否则线上与全新部署会继续分叉。
+-- ===========================================================================
+
+CREATE TABLE IF NOT EXISTS limitup_stock (
+
+  `id` bigint NOT NULL AUTO_INCREMENT,
+  `trade_date` date NOT NULL,
+  `code` varchar(10) NOT NULL,
+  `name` varchar(32) NOT NULL,
+  `pct_chg` float DEFAULT NULL,
+  `close` decimal(12,3) DEFAULT NULL,
+  `amount` decimal(20,2) DEFAULT NULL COMMENT '成交额(元)',
+  `circ_mv` decimal(20,2) DEFAULT NULL COMMENT '流通市值(元)',
+  `turnover` float DEFAULT NULL COMMENT '换手率%',
+  `seal_amount` decimal(20,2) DEFAULT NULL COMMENT '封板资金(元)',
+  `first_seal_time` varchar(8) DEFAULT NULL COMMENT '首封时间',
+  `last_seal_time` varchar(8) DEFAULT NULL COMMENT '最后封板',
+  `open_times` int NOT NULL COMMENT '炸板次数',
+  `boards` int NOT NULL COMMENT '连板数',
+  `industry` varchar(32) DEFAULT NULL COMMENT '东财细分行业(比证监会分类细)',
+  `limit_up_reason` varchar(255) DEFAULT NULL COMMENT '涨停原因(题材串)',
+  `is_sealed_now` tinyint(1) DEFAULT NULL COMMENT '当前是否封板(盘中会变)',
+  `snapshot_at` datetime DEFAULT NULL COMMENT '快照时刻',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_limitup_date_code` (`trade_date`,`code`),
+  KEY `ix_limitup_stock_boards` (`boards`),
+  KEY `ix_limitup_stock_trade_date` (`trade_date`),
+  KEY `ix_limitup_stock_industry` (`industry`),
+  KEY `ix_limitup_stock_code` (`code`)
+) ENGINE=InnoDB AUTO_INCREMENT=53881 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE IF NOT EXISTS concept_daily (
+
+  `id` bigint NOT NULL AUTO_INCREMENT,
+  `trade_date` date NOT NULL,
+  `thscode` varchar(16) NOT NULL,
+  `name` varchar(48) NOT NULL,
+  `last_price` float DEFAULT NULL COMMENT '板块指数点位',
+  `pct_chg` float DEFAULT NULL COMMENT '涨跌幅%',
+  `turnover` decimal(20,2) DEFAULT NULL COMMENT '成交额(元)',
+  `volume` decimal(20,2) DEFAULT NULL,
+  `zt_count` int DEFAULT NULL COMMENT '板块内涨停数',
+  `turnover_share` float DEFAULT NULL COMMENT '成交额占比%',
+  `rank_pct` int DEFAULT NULL COMMENT '当日涨幅排名',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_concept_date_code` (`trade_date`,`thscode`),
+  KEY `ix_concept_daily_pct_chg` (`pct_chg`),
+  KEY `ix_concept_daily_thscode` (`thscode`),
+  KEY `ix_concept_daily_trade_date` (`trade_date`)
+) ENGINE=InnoDB AUTO_INCREMENT=1171 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE IF NOT EXISTS theme_daily (
+
+  `id` bigint NOT NULL AUTO_INCREMENT,
+  `trade_date` date NOT NULL,
+  `theme` varchar(48) NOT NULL,
+  `zt_count` int NOT NULL COMMENT '挂此题材的涨停数',
+  `max_boards` int NOT NULL COMMENT '该题材最高连板',
+  `codes` text COMMENT '涨停个股代码,逗号分隔',
+  `names` text COMMENT '涨停个股名称,逗号分隔',
+  `consec_days` int NOT NULL COMMENT '连续上榜天数',
+  `is_new` tinyint(1) NOT NULL COMMENT '近20日首次出现',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_theme_date` (`trade_date`,`theme`),
+  KEY `ix_theme_daily_is_new` (`is_new`),
+  KEY `ix_theme_daily_trade_date` (`trade_date`),
+  KEY `ix_theme_daily_theme` (`theme`),
+  KEY `ix_theme_daily_consec_days` (`consec_days`)
+) ENGINE=InnoDB AUTO_INCREMENT=359 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE IF NOT EXISTS stock_concept (
+
+  `id` bigint NOT NULL AUTO_INCREMENT,
+  `code` varchar(10) NOT NULL,
+  `thscode` varchar(16) NOT NULL COMMENT '概念板块代码',
+  `concept_name` varchar(48) NOT NULL COMMENT '概念名称',
+  `stock_name` varchar(32) DEFAULT NULL,
+  `created_at` datetime NOT NULL DEFAULT (now()),
+  `updated_at` datetime NOT NULL DEFAULT (now()),
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_sc_code_concept` (`code`,`thscode`),
+  KEY `ix_stock_concept_concept_name` (`concept_name`),
+  KEY `ix_stock_concept_code` (`code`),
+  KEY `ix_stock_concept_thscode` (`thscode`)
+) ENGINE=InnoDB AUTO_INCREMENT=71920 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE IF NOT EXISTS market_sentiment (
+
+  `trade_date` date NOT NULL,
+  `zt_count` int NOT NULL COMMENT '涨停家数',
+  `zb_count` int NOT NULL COMMENT '炸板家数',
+  `seal_rate` float DEFAULT NULL COMMENT '封板率%=涨停/(涨停+炸板)',
+  `strong_count` int NOT NULL COMMENT '强势股家数',
+  `first_board` int NOT NULL COMMENT '首板家数',
+  `ge2` int NOT NULL COMMENT '2板以上家数',
+  `ge3` int NOT NULL COMMENT '3板以上家数',
+  `ge5` int NOT NULL COMMENT '5板以上家数',
+  `height` int NOT NULL COMMENT '最高连板数',
+  `tier_filled` int NOT NULL COMMENT '梯队完整度(2..height非空档位数)',
+  `advance_rate` float DEFAULT NULL COMMENT '晋级率(昨连板池今日续板比例)',
+  `prev_zt_avg_pct` float DEFAULT NULL COMMENT '昨日涨停股今日平均涨跌幅%',
+  `prev_zt_win_rate` float DEFAULT NULL COMMENT '昨日涨停股今日上涨占比%',
+  `ema_ge2` float DEFAULT NULL COMMENT 'ge2的EMA',
+  `ema_height` float DEFAULT NULL COMMENT 'height的EMA',
+  `ema_advance` float DEFAULT NULL COMMENT '晋级率的EMA',
+  `phase_raw` varchar(8) DEFAULT NULL COMMENT '当日原始判定',
+  `phase` varchar(8) DEFAULT NULL COMMENT '2日确认后的稳定阶段',
+  `stance` varchar(16) DEFAULT NULL COMMENT '操作倾向',
+  `created_at` datetime NOT NULL DEFAULT (now()),
+  `updated_at` datetime NOT NULL DEFAULT (now()),
+  `dt_count` int NOT NULL DEFAULT '0' COMMENT '跌停家数',
+  `zt_dt_ratio` float DEFAULT NULL COMMENT '涨跌停比',
+  PRIMARY KEY (`trade_date`),
+  KEY `ix_market_sentiment_phase` (`phase`),
+  KEY `ix_market_sentiment_advance_rate` (`advance_rate`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE IF NOT EXISTS adj_factor (
+
+  `id` bigint NOT NULL AUTO_INCREMENT,
+  `code` varchar(10) NOT NULL,
+  `trade_date` date NOT NULL COMMENT '除权日(ex_date)',
+  `dividend` float NOT NULL COMMENT '每股分红(元)',
+  `bonus` float NOT NULL COMMENT '每股送转(股)',
+  `allot_ratio` float NOT NULL COMMENT '配股比例',
+  `allot_price` float NOT NULL COMMENT '配股价',
+  `ratio` float NOT NULL COMMENT '单次除权比例',
+  `factor` float NOT NULL COMMENT '后复权累乘因子',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_adj_code_date` (`code`,`trade_date`),
+  KEY `ix_adj_factor_trade_date` (`trade_date`),
+  KEY `ix_adj_factor_code` (`code`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE IF NOT EXISTS watch_pullback_legacy (
+
+  `id` bigint NOT NULL AUTO_INCREMENT,
+  `code` varchar(10) NOT NULL,
+  `name` varchar(32) NOT NULL DEFAULT '',
+  `board_group` varchar(8) NOT NULL DEFAULT 'main',
+  `breakout_date` date NOT NULL COMMENT '启动涨停日',
+  `breakout_close` decimal(12,3) DEFAULT NULL COMMENT '启动日原始收盘',
+  `breakout_open` decimal(12,3) DEFAULT NULL COMMENT '启动日原始开盘',
+  `breakout_pct` float DEFAULT NULL COMMENT '启动日涨幅%',
+  `breakout_amount` decimal(20,2) DEFAULT NULL COMMENT '启动日成交额',
+  `gain_from_low` float DEFAULT NULL COMMENT '距120日低点涨幅%',
+  `breakout_vol_ratio` float DEFAULT NULL COMMENT '启动日放量倍数(vs前20日均额)',
+  `flat_days` int DEFAULT NULL COMMENT '启动前横盘天数(仅记录,IC≈0不计分)',
+  `breakout_boards` int DEFAULT NULL COMMENT '启动段连板数(1=孤板)',
+  `pullback_date` date DEFAULT NULL COMMENT '回踩确认日=报警日(未触发则空)',
+  `pullback_close` decimal(12,3) DEFAULT NULL COMMENT '回踩日原始收盘(未触发则空)',
+  `drawdown` float DEFAULT NULL COMMENT '相对启动日收盘%(连板时可为正)',
+  `peak_close` decimal(12,3) DEFAULT NULL COMMENT '启动段最高收盘',
+  `drawdown_from_peak` float DEFAULT NULL COMMENT '相对启动段最高收盘%(回调深度,入池判据)',
+  `dist_ma5` float DEFAULT NULL COMMENT '距MA5 %',
+  `dist_ma10` float DEFAULT NULL COMMENT '距MA10 %(触发判据±3%)',
+  `dist_ma20` float DEFAULT NULL COMMENT '距MA20 %',
+  `pullback_days` int DEFAULT NULL COMMENT '启动→回踩交易日数',
+  `pullback_vol_ratio` float DEFAULT NULL COMMENT '回踩日额比vs启动日',
+  `status` varchar(12) NOT NULL DEFAULT 'armed' COMMENT 'watching/hit/expired',
+  `hit_date` date DEFAULT NULL,
+  `hit_days` int DEFAULT NULL COMMENT '距回踩日交易日数',
+  `expire_date` date DEFAULT NULL COMMENT '10交易日窗口末日(未走满留NULL)',
+  `broke_date` date DEFAULT NULL COMMENT '跌破启动日开盘价日(标记非删除)',
+  `broke_days` int DEFAULT NULL COMMENT '距回踩日天数',
+  `ret1` float DEFAULT NULL COMMENT '回踩后T+1收益%',
+  `ret3` float DEFAULT NULL COMMENT '回踩后T+3收益%',
+  `ret5` float DEFAULT NULL COMMENT '回踩后T+5收益%',
+  `ret10` float DEFAULT NULL COMMENT '回踩后T+10收益%',
+  `max_ret` float DEFAULT NULL COMMENT '窗口内最大收益%',
+  `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  `entry_kind` varchar(12) NOT NULL DEFAULT 'streak' COMMENT 'limitup单根涨停/streak多根阳线',
+  `streak_days` int DEFAULT NULL COMMENT '启动段阳线根数(不含中间十字星)',
+  `streak_gain` float DEFAULT NULL COMMENT '启动段累计涨幅%(段首开→段末收)',
+  `streak_end_date` date DEFAULT NULL COMMENT '启动段末日(回踩窗口起算点)',
+  `first_board` tinyint(1) DEFAULT NULL COMMENT '启动段前60日无涨停(观测字段)',
+  `armed_date` date DEFAULT NULL COMMENT '登记待回踩日(段末次日)',
+  `peak_broken_date` date DEFAULT NULL COMMENT '收盘突破启动段峰值日(=第二波已启动)',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_wpb_code_breakout` (`code`,`breakout_date`),
+  KEY `idx_wpb_code` (`code`),
+  KEY `idx_wpb_pullback` (`pullback_date`),
+  KEY `idx_wpb_breakout` (`breakout_date`),
+  KEY `idx_wpb_status` (`status`),
+  KEY `idx_wpb_kind` (`entry_kind`),
+  KEY `idx_wpb_streak` (`streak_days`),
+  KEY `idx_wpb_armed` (`armed_date`)
+) ENGINE=InnoDB AUTO_INCREMENT=21549 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='突破回踩池(触发=回踩日)';

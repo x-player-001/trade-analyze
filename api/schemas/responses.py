@@ -670,3 +670,45 @@ class FavoriteOut(ORMModel):
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 
+# ---------------- 监控池 × 今日涨停 ----------------
+class PoolLimitupOut(ORMModel):
+    """监控池里今日涨停(或曾摸板)的标的。
+
+    数据来自 `limitup_stock`（盘中每10分钟由 fetch_limitup_live 刷新，
+    盘后由 fetch_hotspot 定格），与三个监控池按【股票代码】join。
+
+    **「涨停」含两种状态**，前端应区分展示：
+        is_sealed_now=True  当前封着
+        is_sealed_now=False 今天摸过板但现在没封住（炸板）
+    `open_times>0` 表示今天炸过几次——**即使当前封着也可能非零**
+    （封→炸→再封）。这是判断封板结不结实的关键。
+    """
+    code: str
+    name: str
+    # 该票出现在哪些监控池里（pullback/watch/lowvol，可多个）
+    pools: List[str] = []
+    # ---- 涨停状态 ----
+    is_sealed_now: Optional[bool] = None      # 当前是否封板
+    open_times: int = 0                       # 炸板次数(只增不减)
+    boards: Optional[int] = None              # 连板数
+    first_seal_time: Optional[str] = None     # 首次封板时间
+    seal_amount: Optional[float] = None       # 封单金额(越小越易炸)
+    pct_chg: Optional[float] = None
+    close: Optional[float] = None
+    limit_up_reason: Optional[str] = None     # 题材串
+    snapshot_at: Optional[datetime] = None    # 数据抓取时刻(判断新鲜度)
+    # ---- 池内信息 ----
+    in_favorite: bool = False                 # 是否已收藏
+
+
+class PoolLimitupStatsOut(BaseModel):
+    """今日涨停与监控池的交集概况。"""
+    trade_date: Optional[date] = None
+    total_limitup: int = 0                    # 今日全市场涨停/摸板总数
+    in_pools: int = 0                         # 其中在监控池里的
+    sealed: int = 0                           # 当前封着的
+    broken: int = 0                           # 炸板的
+    by_pool: Dict[str, int] = {}              # 各池命中数
+    snapshot_at: Optional[datetime] = None
+    is_stale: bool = False                    # 数据是否已过时(非当日)
+
