@@ -460,7 +460,24 @@ MA10 附近才提示。故 `breakout_date`（启动日）与 `pullback_date`（�
 
 ### 在监控池里筛收藏
 
-`GET /api/pullback?only_fav=true` —— 只返回已收藏的票。
-与其他筛选（`max_vol20` / `exclude_broke` / `order_by=hot_score`）可叠加。
+**三个监控池都支持** `only_fav=true`，共用同一份收藏：
+
+| 池 | 用法 |
+|---|---|
+| 回踩池 | `GET /api/pullback?only_fav=true` |
+| 低位首板池 | `GET /api/watch?only_fav=true` |
+| 低位放量池 | `GET /api/lowvol?only_fav=true` |
+
+与各池其他筛选（`max_vol20` / `exclude_broke` / `order_by=hot_score` 等）可叠加。
 
 > 注意 `only_fav` 按**代码**匹配，所以同一只票的多次启动都会命中同一份收藏。
+
+### ⚠️ CORS：写接口需要预检
+
+`POST`/`DELETE`/`PATCH` 带 `Content-Type: application/json` 属**非简单请求**，
+浏览器会先发 `OPTIONS` 预检。服务端 `allow_methods` 已包含
+`GET,POST,DELETE,PATCH,OPTIONS`、`allow_headers` 含 `Content-Type`。
+
+> 2026-09-15 修复：此前 `allow_methods` 写死 `["GET"]`（API 还纯只读时留下的），
+> 导致浏览器写请求全被预检挡下，而 **curl 直连完全正常**——只有浏览器挂，
+> 极易误判成接口逻辑 bug。

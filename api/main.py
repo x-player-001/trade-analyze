@@ -37,8 +37,14 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins_list,
     allow_credentials=False,
-    allow_methods=["GET"],
-    allow_headers=["*"],
+    # 【必须含写方法与 OPTIONS】原为 ["GET"]，是 API 还纯只读时留下的。
+    # 加了收藏写接口后没同步改，导致浏览器对 POST/DELETE/PATCH 的预检
+    # (Content-Type: application/json 属非简单请求，必先发 OPTIONS)
+    # 直接失败——curl 直连正常，只有浏览器挂，很容易误判成接口 bug。
+    allow_methods=["GET", "POST", "DELETE", "PATCH", "OPTIONS"],
+    # 显式列出而非只靠 "*"：带凭证时 "*" 无效，且明确写出来便于排查。
+    allow_headers=["Content-Type", "Accept", "Authorization", "*"],
+    max_age=600,
 )
 
 app.include_router(picks.router)

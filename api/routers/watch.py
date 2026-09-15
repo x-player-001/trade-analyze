@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 
 from api.schemas.responses import WatchPoolOut, WatchPoolStatsOut, WatchTrackOut
 from common.db import get_session
-from common.models import WatchPool, WatchPoolDaily
+from common.models import WatchFavorite, WatchPool, WatchPoolDaily
 
 router = APIRouter(prefix="/api/watch", tags=["watch"])
 
@@ -60,6 +60,10 @@ def watch_list(
     board_group: str | None = Query(None, description="main/other"),
     entry_type: str | None = Query(None, description="solo=孤板 / consecutive=连板"),
     since: date | None = Query(None, description="只看首板日 >= 该日期的"),
+    only_fav: bool = Query(
+        False,
+        description="只看已收藏的票（收藏按代码、三池共享，见 /api/favorite）",
+    ),
     exclude_broke: bool = Query(
         False, description="剔除已跌破首板开盘价的票(默认否:删除会误杀36.5%命中票)"
     ),
@@ -78,6 +82,9 @@ def watch_list(
         stmt = stmt.where(WatchPool.trigger_date >= since)
     if exclude_broke:
         stmt = stmt.where(WatchPool.broke_open_date.is_(None))
+    if only_fav:
+        # 收藏按【股票代码】，三个监控池共用同一份
+        stmt = stmt.where(WatchPool.code.in_(select(WatchFavorite.code)))
     order_map = {
         "live_score": WatchPool.live_score.desc(),
         "entry_score": WatchPool.entry_score.desc(),

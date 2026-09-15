@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 
 from api.schemas.responses import LowvolOut, LowvolStatsOut, LowvolTrackOut
 from common.db import get_session
-from common.models import WatchLowvol, WatchLowvolDaily
+from common.models import WatchFavorite, WatchLowvol, WatchLowvolDaily
 
 router = APIRouter(prefix="/api/lowvol", tags=["lowvol"])
 
@@ -35,6 +35,10 @@ def lowvol_list(
     status: str | None = Query(None, description="watching=跟踪中 / settled=已结算"),
     board_group: str | None = Query(None, description="main/other"),
     first_board: bool | None = Query(None, description="只看首板(实测差2.74pp)"),
+    only_fav: bool = Query(
+        False,
+        description="只看已收藏的票（收藏按代码、三池共享，见 /api/favorite）",
+    ),
     exclude_limit_up: bool = Query(
         False, description="剔除触发日涨停的(当日难买入);实测仅占2.4%且超额相近"
     ),
@@ -52,6 +56,9 @@ def lowvol_list(
         stmt = stmt.where(WatchLowvol.first_board.is_(first_board))
     if exclude_limit_up:
         stmt = stmt.where(WatchLowvol.limit_up.is_(False))
+    if only_fav:
+        # 收藏按【股票代码】，三个监控池共用同一份
+        stmt = stmt.where(WatchLowvol.code.in_(select(WatchFavorite.code)))
     if since:
         stmt = stmt.where(WatchLowvol.trigger_date >= since)
     order_map = {
