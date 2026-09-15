@@ -605,7 +605,22 @@ class LimitupStock(Base):
     seal_amount: Mapped[Optional[float]] = mapped_column(Money, comment="封板资金(元)")
     first_seal_time: Mapped[Optional[str]] = mapped_column(String(8), comment="首封时间")
     last_seal_time: Mapped[Optional[str]] = mapped_column(String(8), comment="最后封板")
-    open_times: Mapped[int] = mapped_column(Integer, default=0, comment="炸板次数")
+    # 炸板次数。【只增不减】——盘中 upsert 时取 GREATEST(已有, 新值)：
+    # 一只票 10:00 在炸板池(open_times=1)、10:20 封回去进了涨停池，而
+    # **涨停池根本不带 open_times**（实测 28 条涨停里非零的是 0 条），
+    # 直接写会把 1 冲回 0，"今天炸过"这个事实就丢了。
+    open_times: Mapped[int] = mapped_column(Integer, default=0, comment="炸板次数(只增不减)")
+    # 当前是否封着。盘中会反复变（封→炸→再封）；收盘后即定格为最终状态。
+    # 与 open_times 配合才能还原过程：is_sealed_now=1 且 open_times=2
+    # 表示"炸过两次但现在封着"。
+    is_sealed_now: Mapped[Optional[bool]] = mapped_column(
+        Boolean, comment="当前是否封板(盘中会变)"
+    )
+    # 本行数据的抓取时刻。盘中 10 分钟一次，据此判断数据新鲜度；
+    # 也用于区分"盘中快照"与"18:30 盘后定格"。
+    snapshot_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime, comment="快照时刻"
+    )
     boards: Mapped[int] = mapped_column(Integer, default=1, index=True, comment="连板数")
     # 涨停原因(同花顺)：`+` 连接的题材串，如 "800G光引擎+CPO+AI算力"。
     # 这是目前唯一能拿到的真正题材维度——东财/同花顺爬虫接口与 tushare
