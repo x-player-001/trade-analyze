@@ -242,6 +242,14 @@ def confirm(session: Session, alert_date: date) -> int:
     ).all())
     if not alerts:
         return 0
+    # 【必须等 daily_pipeline 跑完】回填依赖当日日线已入库+池已推进。
+    # 抢在前面跑会把全部预警判成 False —— 不是"预判错了"，是"还没结算"，
+    # 而 confirmed 一旦写死就不再重算（只捞 IS NULL），准确率被永久做低。
+    latest = session.scalar(select(func.max(DailyQuote.trade_date)))
+    if latest is None or latest < alert_date:
+        log.warning("库内最新交易日 %s < 预警日 %s —— daily_pipeline 尚未跑完，"
+                    "跳过回填（否则会把全部预警误判为未命中）", latest, alert_date)
+        return 0
     pool_ids = [a.pool_id for a in alerts]
     got = {
         pid: pd_ for pid, pd_ in session.execute(

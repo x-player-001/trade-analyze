@@ -174,7 +174,11 @@ def test_confirm_marks_true_when_really_triggered(session):
     with _mock_live(9.8):
         live.run(session, today=ad)
     session.commit()
-    # 模拟 18:30 收盘后正式入池
+    # 模拟 18:30 收盘后：当日日线入库 + 正式入池
+    session.add(DailyQuote(code=p.code, trade_date=ad, raw_open=9.8,
+                           raw_high=9.8, raw_low=9.8, raw_close=9.8, close=9.8,
+                           volume=1.0e6, volume_std=1.0e6, amount=1.0e8,
+                           pct_chg=0.0))
     p.status, p.pullback_date = "triggered", ad
     session.commit()
     live.confirm(session, ad)
@@ -192,7 +196,12 @@ def test_confirm_marks_false_when_faded_at_close(session):
     with _mock_live(9.8):
         live.run(session, today=ad)
     session.commit()
-    # 收盘后仍是 armed（尾盘拉回去了）
+    # 收盘后日线入库，但该票仍是 armed（尾盘拉回去了）
+    session.add(DailyQuote(code=p.code, trade_date=ad, raw_open=10.5,
+                           raw_high=10.5, raw_low=10.5, raw_close=10.5,
+                           close=10.5, volume=1.0e6, volume_std=1.0e6,
+                           amount=1.0e8, pct_chg=0.0))
+    session.commit()
     live.confirm(session, ad)
     session.commit()
     assert session.query(WatchPullbackAlert).one().confirmed is False
@@ -283,3 +292,19 @@ def test_one_bad_code_does_not_kill_whole_batch(monkeypatch):
     assert set(got) == {"600001", "600002"}      # 坏码被跳过，好的都拿到
     assert got["600001"][0] == 10.0
     assert len(calls) == 4                        # 1次整批 + 3次逐只
+
+
+def test_confirm_refuses_before_pipeline_catches_up(session):
+    """daily_pipeline 未跑完时不可回填——否则全部预警被误判为未命中。
+
+    实跑踩到：19:00 的 confirm 抢在 18:30 管线之前完成，12 条预警全被写成
+    False。那不是「预判错了」而是「还没结算」，且 confirmed 一旦写死就不再
+    重算（只捞 IS NULL），准确率被永久做低。
+    """
+    p, ds = _seed(session, closes=[10.0] * 19, peak=12.0)
+    ad = ds[-1] + timedelta(days=1)       # 比库内最新交易日晚一天
+    with _mock_live(9.8):
+        live.run(session, today=ad)
+    session.commit()
+    assert live.confirm(session, ad) == 0            # 拒绝回填
+    assert session.query(WatchPullbackAlert).one().confirmed is None
