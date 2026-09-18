@@ -353,6 +353,9 @@ CREATE TABLE IF NOT EXISTS watch_pullback (
   dist_ma20          FLOAT       COMMENT '距MA20 %',
   pullback_days      INT         COMMENT '启动→回踩交易日数',
   pullback_vol_ratio FLOAT       COMMENT '回踩日额比vs启动日',
+  -- 节奏分型 急/中/缓：若涨停预计多快(非会不会涨停)。判据见
+  -- engine/jobs/watch_pullback.py:classify_rhythm。仅供分组查看,不作筛选。
+  rhythm             VARCHAR(4)  COMMENT '节奏分型 急/中/缓',
   -- 跟踪与结算
   -- 状态机：armed=待回踩(未报警) / triggered=已报警 / missed=第二波已启动作废
   -- / failed=跌破段首开盘作废 / expired=未等到回踩 / hit,settled=触发后结算
@@ -380,7 +383,8 @@ CREATE TABLE IF NOT EXISTS watch_pullback (
   KEY idx_wpb_kind (entry_kind),
   KEY idx_wpb_armed (armed_date),
   KEY idx_wpb_streak (streak_days),
-  KEY idx_wpb_vol20 (vol20)
+  KEY idx_wpb_vol20 (vol20),
+  KEY idx_wpb_rhythm (rhythm)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='突破回踩池(触发=回踩日)';
 
 CREATE TABLE IF NOT EXISTS watch_pullback_daily (

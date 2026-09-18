@@ -520,3 +520,58 @@ def test_advance_pending_leaves_armed_when_no_new_data(session):
     session.commit()
     assert advance_pending(session) == 0
     assert session.scalars(select(WatchPullback)).one().status == "armed"
+
+
+# ---------------------------------------------------------------------------
+# 节奏分型 classify_rhythm
+#
+# 判据来自实测 n=13702（hit 1576 + settled 12126，全部状态机口径，无 legacy）：
+#   急 n=647  快速涨停(T+1~2) 11.90%  总命中 26.58%  快占命中 44.8%
+#   中 n=7783                  3.58%          12.49%          28.7%
+#   缓 n=5272                  1.54%           8.19%          18.8%
+# 基准快占命中 27.7%——急组升到44.8、缓组降到18.8，说明在区分节奏而非强弱。
+# ---------------------------------------------------------------------------
+from engine.jobs.watch_pullback import classify_rhythm
+
+
+def test_rhythm_two_boards_is_fast():
+    """启动段≥2板直接判急——单因子最强，0板1.94% → 2板+ 16.67%。"""
+    assert classify_rhythm(2, -3.0, 1.0) == "急"
+    assert classify_rhythm(3, None, None) == "急"
+
+
+def test_rhythm_deep_drawdown_is_fast():
+    """回撤≤-12%直接判急，不看板数——实测该档快速率 9.50%。"""
+    assert classify_rhythm(0, -12.0, 0.5) == "急"
+    assert classify_rhythm(0, -20.0, None) == "急"
+
+
+def test_rhythm_combo_requires_all_three():
+    """有板+深回撤+放量 三者齐备才算急，缺一降级。"""
+    assert classify_rhythm(1, -8.0, 1.5) == "急"
+    assert classify_rhythm(0, -8.0, 1.5) == "中"    # 无板
+    assert classify_rhythm(1, -7.0, 1.5) == "中"    # 回撤不够深
+    assert classify_rhythm(1, -8.0, 1.4) == "中"    # 放量不够
+
+
+def test_rhythm_no_board_shallow_is_slow():
+    """无板+浅回撤=缓，实测该组 n=5272 快速率仅 1.54%。"""
+    assert classify_rhythm(0, -3.0, 5.0) == "缓"    # 放量再大也是缓
+    assert classify_rhythm(None, -1.0, None) == "缓"
+
+
+def test_rhythm_missing_drawdown_falls_back_to_mid():
+    """drawdown 缺失时不可误判为缓——缓必须有「确实回撤浅」的证据。
+
+    None 走到 `dd > -4` 的判断会因 None 比较报错或恒假，必须显式挡掉。
+    """
+    assert classify_rhythm(0, None, 1.0) == "中"
+    assert classify_rhythm(None, None, None) == "中"
+
+
+def test_rhythm_boundaries_are_inclusive_as_documented():
+    """边界值按文档口径：≤-12 判急、>-4 判缓，等于-4本身不是缓。"""
+    assert classify_rhythm(0, -12.0, None) == "急"   # 含等于
+    assert classify_rhythm(0, -11.9, None) == "中"
+    assert classify_rhythm(0, -4.0, None) == "中"    # 等于-4 不算浅
+    assert classify_rhythm(0, -3.99, None) == "缓"

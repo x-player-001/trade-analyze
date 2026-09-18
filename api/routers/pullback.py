@@ -246,6 +246,14 @@ def pullback_list(
                     "命中率 7.49% vs 14.61%，是全池区分度最大的单一维度。"
                     "传 false 可取回（数据仍留库，只是不默认展示）",
     ),
+    rhythm: str | None = Query(
+        None,
+        description="节奏分型：急/中/缓——【若涨停、预计多快】，非会不会涨停。"
+                    "急 T+1~2涨停占11.90%(n=647) / 中 3.58% / 缓 1.54%(n=5272)。"
+                    "**建议只用于分组查看，不要拿它当筛选**——缓组样本是急组8倍，"
+                    "过滤掉会砍掉大部分命中；且「缓」只是「不具备急涨特征」，"
+                    "不代表预计会慢慢涨",
+    ),
     only_hot: bool = Query(
         False, description="只看命中热门概念/题材的（hot_score 非空）"
     ),
@@ -303,6 +311,8 @@ def pullback_list(
         # vol20 为空的行（回补前的存量）一并排除，避免混入未度量的样本。
         stmt = stmt.where(WatchPullback.vol20.isnot(None),
                           WatchPullback.vol20 <= max_vol20)
+    if rhythm:
+        stmt = stmt.where(WatchPullback.rhythm == rhythm)
     if min_streak_gain is not None:
         stmt = stmt.where(WatchPullback.streak_gain >= min_streak_gain)
     if since:

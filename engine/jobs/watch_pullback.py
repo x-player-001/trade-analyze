@@ -98,6 +98,65 @@ MIN_DRAWDOWN = 1.0
 HORIZON = 10           # 回踩后跟踪窗口(交易日)
 CODE_BATCH = 400       # 分批加载，控内存峰值（sgp 仅 2核3.6G）
 
+# ---- 节奏分型阈值（实测，见 classify_rhythm）----
+RH_BOARDS_STRONG = 2    # 启动段板数≥此值直接判急
+RH_DD_DEEP = -12.0      # 回撤≤此值直接判急
+RH_DD_MID = -8.0        # 组合判据的回撤门槛
+RH_VOL_MID = 1.5        # 组合判据的放量门槛
+RH_DD_SHALLOW = -4.0    # 浅回撤上界（判缓）
+
+
+def classify_rhythm(
+    breakout_boards: int | None,
+    drawdown_from_peak: float | None,
+    breakout_vol_ratio: float | None,
+) -> str:
+    """回踩后的涨停节奏分型：急 / 中 / 缓。只用回踩日及之前的信息。
+
+    **这不是「会不会涨停」的预测，是「若涨停、多快」的预期**——用于设定
+    持有周期，不作入池筛选（筛掉「缓」会砍掉大部分命中，见下表）。
+
+    实测 n=13702（hit 1576 + settled 12126，全部为状态机口径）：
+
+        节奏    n      快速涨停%   总命中%   快占命中%
+        急     647     11.90      26.58     44.8
+        中    7783      3.58      12.49     28.7
+        缓    5272      1.54       8.19     18.8
+                                            ↑ 基准 27.7
+
+    「快占命中」是关键校验：若条件只是普遍抬高命中率，该比例不会变。
+    急组升到 44.8%、缓组降到 18.8%，说明确实在区分**节奏**而非强弱。
+
+    三个判据各自单调（快速涨停占比）：
+        板数   0板 1.94% → 1板 6.90% → 2板+ 16.67%   ← 最强，8倍
+        回撤   >-2% 1.87% → ≤-12% 9.50%
+        放量   <0.8x 2.84% → ≥3x 5.36%               ← 最弱，单独不用
+
+    形态逻辑：启动够猛（有板/放量）+ 回调够深 = 情绪票的急拉急杀节奏。
+    反之无板+浅回撤是温吞形态，靠均线慢慢推，急不起来。
+
+    **「缓」是排除法不是预测**——实测没有任何条件能把震荡组占比拉起来
+    （所有分档都是 4.6%~7.6%）。因为震荡型何时涨停由回踩后的题材轮动与
+    大盘环境决定，那个信息【不在回踩日的数据里】。故「缓」的真实含义是
+    「不具备急涨特征」，其中既有慢涨的、也有大量根本不涨的。
+
+    时间稳定性已验证：按回踩日分半，急组快速率 10.07% / 13.28%；
+    分季度 6.09%~18.06%，而缓组恒在 1.28%~2.03%，从未反转。
+    """
+    b = breakout_boards or 0
+    dd = drawdown_from_peak
+    vr = breakout_vol_ratio
+    if b >= RH_BOARDS_STRONG:
+        return "急"
+    if dd is not None and dd <= RH_DD_DEEP:
+        return "急"
+    if (b >= 1 and dd is not None and dd <= RH_DD_MID
+            and vr is not None and vr >= RH_VOL_MID):
+        return "急"
+    if b == 0 and dd is not None and dd > RH_DD_SHALLOW:
+        return "缓"
+    return "中"
+
 
 def _ma(vals: list[float], n: int) -> float | None:
     """末 n 个收盘的均值；不足 n 个返回 None（不用短窗口凑数）。"""
@@ -400,6 +459,11 @@ def detect_new_entries(session: Session, lookback_days: int = 1) -> int:
 
                 pb_date = res.get("pullback_date")
                 expire_i = (idx[pb_date] + HORIZON) if pb_date else None
+                # 节奏分型：只有已回踩(triggered/hit/settled)才有 drawdown_from_peak，
+                # armed/missed/failed 此时形态未成形，留空。
+                rhythm = (classify_rhythm(boards, res.get("drawdown_from_peak"),
+                                          bo_vol_ratio)
+                          if res.get("pullback_date") else None)
                 rows.append(dict(
                     code=code,
                     name=bs.name if bs else "",
@@ -420,6 +484,7 @@ def detect_new_entries(session: Session, lookback_days: int = 1) -> int:
                     streak_end_date=dates[se],
                     first_board=not prior_lu,
                     vol20=vol20,
+                    rhythm=rhythm,
                     status=st,
                     # 【取段末日本身，不可取 dates[se+1]】刚登记 armed 时段末
                     # 往往就是最后一个已知交易日，se+1 不存在 → 恒为 NULL。
@@ -525,6 +590,12 @@ def advance_pending(session: Session) -> int:
             pi = idx.get(p.pullback_date)
             if pi is not None and pi + HORIZON < len(dates):
                 p.expire_date = dates[pi + HORIZON]
+            # 【必须在这里也算】armed 行入表时形态未成形、rhythm 为空，
+            # 真正的回踩发生在本函数里，漏了这步 armed→triggered 的行
+            # 会永远没有节奏标记。
+            p.rhythm = classify_rhythm(
+                p.breakout_boards, p.drawdown_from_peak, p.breakout_vol_ratio
+            )
         changed += 1
 
     q.clear()
@@ -656,11 +727,37 @@ def track_daily(session: Session) -> int:
     return len(daily_rows)
 
 
+def backfill_rhythm(session: Session) -> int:
+    """给存量已回踩的行补节奏分型。纯计算，不读行情，可反复跑。
+
+    只处理 pullback_date 非空的行（armed/missed/failed 形态未成形，无分型）。
+    """
+    pools = list(session.scalars(
+        select(WatchPullback).where(WatchPullback.pullback_date.isnot(None))
+    ).all())
+    n = 0
+    for p in pools:
+        rh = classify_rhythm(p.breakout_boards, p.drawdown_from_peak,
+                             p.breakout_vol_ratio)
+        if p.rhythm != rh:
+            p.rhythm = rh
+            n += 1
+    log.info("节奏回补：扫描 %d 条，更新 %d 条", len(pools), n)
+    return n
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="突破回踩监控池")
     ap.add_argument("--backfill", type=int, default=0,
                     help="回补最近N个交易日的回踩事件(默认0=只检测最新)")
+    ap.add_argument("--backfill-rhythm", action="store_true",
+                    help="只给存量行补节奏分型(纯计算,不读行情)")
     args = ap.parse_args()
+
+    if args.backfill_rhythm:
+        with session_scope() as s:
+            backfill_rhythm(s)
+        return
 
     lookback = args.backfill if args.backfill > 0 else 1
     log.info("===== 突破回踩池任务启动 (lookback=%d) =====", lookback)

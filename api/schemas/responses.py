@@ -578,6 +578,11 @@ class PullbackOut(ORMModel):
     dist_ma20: Optional[float] = None
     pullback_days: Optional[int] = None          # 启动→回踩交易日数
     pullback_vol_ratio: Optional[float] = None   # 回踩日额比vs启动日
+    # 节奏分型 急/中/缓——【若涨停、预计多快】，不是会不会涨停。
+    # 急: T+1~2 涨停占 11.90%(n=647) / 中: 3.58% / 缓: 1.54%(n=5272)
+    # 前端据此设持有预期：急型盯 T+1~T+2，缓型要有等两周的准备。
+    # 【不可用于筛选】缓组样本是急组8倍，按节奏过滤会砍掉大部分命中。
+    rhythm: Optional[str] = None                 # 急/中/缓
     # ---- 状态机与结算 ----
     # armed=已登记待回踩(未报警) / triggered=回踩到位(**要看的就是这个**)
     # missed=第二波已启动作废 / failed=跌破段首开盘作废 / expired=未等到回踩

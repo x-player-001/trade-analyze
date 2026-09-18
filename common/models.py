@@ -890,6 +890,17 @@ class WatchPullback(Base, TimestampMixin):
     pullback_vol_ratio: Mapped[Optional[float]] = mapped_column(
         Float, comment="回踩日额比vs启动日"
     )
+    # 节奏分型 急/中/缓：若涨停、预计多快。由 classify_rhythm() 从
+    # breakout_boards + drawdown_from_peak + breakout_vol_ratio 算出，
+    # 只用回踩日及之前信息。
+    #
+    # 【是持有周期预期，不是入池筛选】实测急组快速涨停(T+1~2)占 11.90%、
+    # 缓组仅 1.54%，但缓组样本是急组的 8 倍——按节奏筛会砍掉大部分命中。
+    # 且「缓」只是「不具备急涨特征」的排除法，不代表"预计会慢慢涨"。
+    # 判据与实测分档见 engine/jobs/watch_pullback.py:classify_rhythm。
+    rhythm: Mapped[Optional[str]] = mapped_column(
+        String(4), index=True, comment="节奏分型 急/中/缓"
+    )
 
     # ---- 跟踪与结算 ----
     # ---- 状态机（2026-09-13 改造）----
