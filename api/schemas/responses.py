@@ -622,6 +622,40 @@ class PullbackOut(ORMModel):
     hot_score: Optional[float] = None
 
 
+class PullbackAlertOut(ORMModel):
+    """盘中回踩预警（14:45）——**留出收盘前的下单时间**。
+
+    正式入池要等 18:30 收盘后跑完 daily_pipeline，那时已经买不进了。
+    本预警用盘中实时价预判，**是提示不是确认**：尾盘 15 分钟可能拉走或
+    砸穿，故字段都带「预警时」语义，与 PullbackOut 的收盘口径不同源。
+
+    `confirmed` 次日回填：该预警在收盘后是否真的入池。前端可据此展示
+    历史准确率——这个数字长期偏低说明 14:45 太早，应后移。
+    """
+    id: int
+    pool_id: int                                 # 对应 watch_pullback.id
+    code: str
+    name: str
+    alert_date: date
+    snapshot_at: Optional[datetime] = None       # 实时价抓取时刻(判断新鲜度)
+    last_price: Optional[float] = None           # 预警时实时价(非收盘价)
+    dist_ma5: Optional[float] = None
+    dist_ma10: Optional[float] = None            # 判据(±3%内)
+    dist_ma20: Optional[float] = None
+    drawdown_from_peak: Optional[float] = None   # 相对启动段最高收盘%
+    pullback_days: Optional[int] = None          # 启动段末→今日交易日数
+    amount: Optional[float] = None               # 预警时累计成交额
+    rhythm: Optional[str] = None                 # 急/中/缓，急型排前
+    # ---- 冗余的启动段信息，免前端再 join ----
+    breakout_date: Optional[date] = None
+    breakout_boards: Optional[int] = None
+    vol20: Optional[float] = None
+    gain_from_low: Optional[float] = None
+    # ---- 次日回填 ----
+    confirmed: Optional[bool] = None             # 收盘后是否真入池(NULL=未回填)
+    in_favorite: bool = False
+
+
 class PullbackStatsOut(BaseModel):
     """突破回踩池统计（已结算样本）。
 

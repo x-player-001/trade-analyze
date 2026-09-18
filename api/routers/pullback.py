@@ -23,6 +23,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from api.schemas.responses import (
+    PullbackAlertOut,
     PullbackOut,
     PullbackStatsOut,
     PullbackTrackOut,
@@ -34,6 +35,7 @@ from common.models import (
     StockConcept,
     ThemeDaily,
     WatchPullback,
+    WatchPullbackAlert,
     WatchPullbackDaily,
 )
 
@@ -452,6 +454,47 @@ def pullback_stats(
         avg_max_ret=round(sum(mx) / len(mx), 2) if mx else None,
         by_boards=by_boards,
     )
+
+
+@router.get("/alerts", response_model=list[PullbackAlertOut],
+            summary="盘中回踩预警(14:45)")
+def pullback_alerts(
+    alert_date: date | None = Query(
+        None, description="预警日；默认取最新一天"
+    ),
+    rhythm: str | None = Query(None, description="节奏分型 急/中/缓"),
+    only_fav: bool = Query(False, description="只看已收藏的"),
+    session: Session = Depends(get_session),
+) -> list[PullbackAlertOut]:
+    """今日 14:45 预判会触发回踩的票——**留出收盘前的下单时间**。
+
+    正式入池要等 18:30 收盘后（见 `/api/pullback`），那时已经买不进了。
+    本接口用盘中实时价预判，**是提示不是确认**：尾盘 15 分钟可能拉走或
+    砸穿，`confirmed` 由次日回填告诉你当时准不准。
+
+    【路由顺序】本路由必须定义在 `/{code}` **之前**，否则 "alerts" 会被
+    当成股票代码匹配掉。
+    """
+    d = alert_date or session.scalar(func.max(WatchPullbackAlert.alert_date).select())
+    if d is None:
+        return []
+    stmt = select(WatchPullbackAlert).where(WatchPullbackAlert.alert_date == d)
+    if rhythm:
+        stmt = stmt.where(WatchPullbackAlert.rhythm == rhythm)
+    if only_fav:
+        stmt = stmt.where(WatchPullbackAlert.code.in_(select(WatchFavorite.code)))
+    rows = list(session.scalars(stmt).all())
+    fav = set(session.scalars(select(WatchFavorite.code)).all())
+    outs = []
+    for r in rows:
+        o = PullbackAlertOut.model_validate(r)
+        o.in_favorite = r.code in fav
+        outs.append(o)
+    # 急型排前（T+1~2 涨停占 11.90% vs 缓型 1.54%），再按回撤深的优先
+    order = {"急": 0, "中": 1, "缓": 2}
+    outs.sort(key=lambda o: (order.get(o.rhythm or "", 3),
+                             o.drawdown_from_peak or 0))
+    return outs
 
 
 @router.get("/{code}", response_model=PullbackOut, summary="单只标的的回踩记录与跟踪")

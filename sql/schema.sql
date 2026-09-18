@@ -617,3 +617,37 @@ CREATE TABLE IF NOT EXISTS watch_pullback_legacy (
   KEY `idx_wpb_streak` (`streak_days`),
   KEY `idx_wpb_armed` (`armed_date`)
 ) ENGINE=InnoDB AUTO_INCREMENT=21549 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='突破回踩池(触发=回踩日)';
+
+-- ---------------------------------------------------------------------------
+-- 回踩池盘中预警：14:45 用实时价预判今日会触发回踩的票。
+-- 【与 watch_pullback 严格分表】本表是盘中预判(last_price 当收盘价算)，
+-- watch_pullback 是 18:30 收盘后的权威判定。混表会让历史序列混进
+-- 「当时看着像、收盘却不是」的行，污染后续所有 IC 统计。
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS watch_pullback_alert (
+  id                 BIGINT      NOT NULL AUTO_INCREMENT,
+  pool_id            BIGINT      NOT NULL COMMENT '对应 watch_pullback.id',
+  code               VARCHAR(10) NOT NULL,
+  name               VARCHAR(32) NOT NULL DEFAULT '',
+  alert_date         DATE        NOT NULL,
+  snapshot_at        DATETIME    COMMENT '实时价抓取时刻(判断新鲜度)',
+  last_price         DECIMAL(12,3) COMMENT '预警时实时价(非收盘价)',
+  dist_ma5           FLOAT       COMMENT '距MA5 %',
+  dist_ma10          FLOAT       COMMENT '距MA10 %(判据)',
+  dist_ma20          FLOAT       COMMENT '距MA20 %',
+  drawdown_from_peak FLOAT       COMMENT '相对启动段最高收盘%',
+  pullback_days      INT         COMMENT '启动段末→今日交易日数',
+  amount             DECIMAL(20,2) COMMENT '预警时累计成交额',
+  rhythm             VARCHAR(4)  COMMENT '节奏分型 急/中/缓',
+  breakout_date      DATE,
+  breakout_boards    INT,
+  vol20              FLOAT,
+  gain_from_low      FLOAT,
+  confirmed          TINYINT(1)  COMMENT '收盘后是否真入池(次日回填,NULL=未回填)',
+  created_at         DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_wpba_pool_date (pool_id, alert_date),
+  KEY idx_wpba_code (code),
+  KEY idx_wpba_date (alert_date),
+  KEY idx_wpba_confirmed (confirmed)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='回踩池盘中预警(14:45)';

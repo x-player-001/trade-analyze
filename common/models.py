@@ -973,6 +973,61 @@ class WatchPullbackDaily(Base):
 # ---------------------------------------------------------------------------
 # 收藏：唯一一张【API 可写】的表
 # ---------------------------------------------------------------------------
+class WatchPullbackAlert(Base):
+    """回踩池【盘中预警】——14:45 用实时价预判今日会触发回踩的票。
+
+    **与 watch_pullback 严格分表**：本表存的是盘中预判（用 last_price 当
+    收盘价算），watch_pullback 存的是 18:30 收盘后的权威判定。若让盘中价
+    写进权威表，历史序列里会混进「当时看着像、收盘却不是」的行，后续所有
+    IC 统计都被污染——与 watch_lowvol/watch_pullback 独立成表同源。
+
+    存在的理由：daily_pipeline 跑在 18:30，那时早已收盘，而回踩池的价值
+    恰在「回踩当日尾盘买入、次日二次启动」。实测急型中 T+1 涨停占 11.90%，
+    18:30 才算出来的话这部分全被错过。
+
+    `confirmed` 由次日回填（`--confirm`）：该预警在收盘后是否真的入池。
+    **14:45 是预判不是确认**，尾盘15分钟可能拉走或砸穿。这个准确率要定期
+    回看——长期偏低说明时点太早，应后移。
+    """
+
+    __tablename__ = "watch_pullback_alert"
+    __table_args__ = (
+        UniqueConstraint("pool_id", "alert_date", name="uq_wpba_pool_date"),
+    )
+
+    id: Mapped[int] = mapped_column(BigIntPK, primary_key=True, autoincrement=True)
+    # 对应 watch_pullback.id —— 预警指向的是那条 armed 记录
+    pool_id: Mapped[int] = mapped_column(BigIntPK, nullable=False, index=True)
+    code: Mapped[str] = mapped_column(String(10), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(32), nullable=False, default="")
+    alert_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    # 实时价抓取时刻——判断预警新鲜度，也用于事后复盘当时是几点的价
+    snapshot_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
+    last_price: Mapped[Optional[float]] = mapped_column(Price, comment="预警时实时价")
+    # 以下均用实时价算，口径与 watch_pullback 同名字段一致（那边用收盘价）
+    dist_ma5: Mapped[Optional[float]] = mapped_column(Float, comment="距MA5 %")
+    dist_ma10: Mapped[Optional[float]] = mapped_column(Float, comment="距MA10 %(判据)")
+    dist_ma20: Mapped[Optional[float]] = mapped_column(Float, comment="距MA20 %")
+    drawdown_from_peak: Mapped[Optional[float]] = mapped_column(
+        Float, comment="相对启动段最高收盘%"
+    )
+    pullback_days: Mapped[Optional[int]] = mapped_column(Integer, comment="启动段末→今日")
+    amount: Mapped[Optional[float]] = mapped_column(Money, comment="预警时累计成交额")
+    rhythm: Mapped[Optional[str]] = mapped_column(String(4), comment="节奏分型 急/中/缓")
+    # 冗余启动段信息，免得前端为展示再 join 一次 watch_pullback
+    breakout_date: Mapped[Optional[date]] = mapped_column(Date)
+    breakout_boards: Mapped[Optional[int]] = mapped_column(Integer)
+    vol20: Mapped[Optional[float]] = mapped_column(Float)
+    gain_from_low: Mapped[Optional[float]] = mapped_column(Float)
+    # 次日回填：收盘后该票是否真的 triggered。NULL=尚未回填
+    confirmed: Mapped[Optional[bool]] = mapped_column(
+        Boolean, index=True, comment="收盘后是否真入池(次日回填)"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+
+
 class WatchFavorite(Base, TimestampMixin):
     """人工收藏的关注标的。
 

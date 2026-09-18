@@ -136,6 +136,26 @@ class HithinkSource:
         return self._items(self._get(
             "/a-share/special-data/limit-down-pool", date=date))
 
+    # ---------------- 个股实时行情 ----------------
+    def stock_snapshot(self, thscodes: list[str]) -> list[dict]:
+        """个股行情快照（**盘中实时**）。
+
+        字段：last_price 最新价、open_price/high_price/low_price、
+        prev_price 昨收、price_change_ratio_pct 涨跌幅%、
+        turnover 成交额(元)、volume 成交量。
+
+        **这是盘中唯一能拿到当日价格的路径**——tushare 的 `pro.daily`
+        只有收盘后才有当日数据，盘中查返回 0 行。故盘中预警任务
+        (watch_pullback_live) 必须走本接口，不能复用日线管线。
+
+        注意 turnover 是成交额、volume 是成交量，与库内 amount/volume
+        的命名相反，映射时别搞混。
+        """
+        if not thscodes:
+            return []
+        return self._items(self._get(
+            "/a-share/prices/snapshot", thscodes=",".join(thscodes)))
+
     # ---------------- 集合竞价 ----------------
     def auction_snapshot(self, thscodes: list[str]) -> list[dict]:
         """集合竞价快照。**对短线打法价值最高的数据**。
