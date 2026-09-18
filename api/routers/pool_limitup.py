@@ -24,7 +24,11 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from api.schemas.responses import PoolLimitupOut, PoolLimitupStatsOut
+from api.schemas.responses import (
+    PoolLimitupOut,
+    PoolLimitupPoolRef,
+    PoolLimitupStatsOut,
+)
 from common.db import get_session
 from common.models import (
     LimitupStock,
@@ -36,29 +40,74 @@ from common.models import (
 
 router = APIRouter(prefix="/api/pool-limitup", tags=["pool-limitup"])
 
-# 各池的「有效」状态——只看还在跟踪/已报警的，不翻历史归档
-POOL_SPECS = (
-    ("pullback", WatchPullback, ("triggered", "hit", "settled")),
-    ("watch", WatchPool, ("watching", "hit")),
-    ("lowvol", WatchLowvol, ("watching", "settled")),
+# 各池「仍在跟踪」的状态——只有这些才是活信号。
+#
+# 【不可把终态写进这里】hit / settled / expired 都是观测窗口已走完、标签已
+# 兑现的归档样本，今天涨停与当初那次入池无关。曾把它们算作有效，实测
+# 2026-09-18 标出 30 只，其中 15 只是纯终态触发的虚假标记（虚增一倍）；
+# 修复后 20 只 = 活信号 16 + 命中延续 4。pullback 池尤甚：窗口内 1169 个
+# 代码有 700 个是终态，因为 settled(12030条) 是 triggered(480条) 的 25 倍。
+LIVE_SPECS = (
+    ("pullback", WatchPullback, ("triggered",)),
+    ("watch", WatchPool, ("watching",)),
+    ("lowvol", WatchLowvol, ("watching",)),
 )
+
+# 命中后仍算「延续期」的池——按 hit_date 卡，不是按入池日。
+#
+# 【口径必须分开】活跃态按入池日筛、终态按结束日筛。原实现的 bug 正是
+# 拿 trigger_date 去筛一个早已结束的事件——入池日新不代表事件还活着。
+# 实测同为 status=hit：古越龙山 09-16 命中 09-18 又涨停（真延续，该留），
+# 新宏泰 08-28 命中距今 21 天（陈年旧账，该剔）。
+HIT_SPECS = (
+    ("pullback", WatchPullback),
+    ("watch", WatchPool),
+)
+RECENT_HIT_DAYS = 10   # 命中后 N 个自然日内再涨停仍视为同一波延续
 
 
 def _latest_limitup_date(session: Session) -> date | None:
     return session.scalar(select(func.max(LimitupStock.trade_date)))
 
 
-def _pool_codes(session: Session, since: date | None) -> dict[str, set[str]]:
-    """各池的代码集合。since 限制入池日期，避免翻出几个月前的老票。"""
-    out: dict[str, set[str]] = {}
-    for key, model, statuses in POOL_SPECS:
-        stmt = select(model.code).where(model.status.in_(statuses))
+def _entry_col(model):
+    """三个池的「入池日」字段名不同。"""
+    return model.pullback_date if model is WatchPullback else model.trigger_date
+
+
+def _pool_records(
+    session: Session, since: date | None, hit_since: date | None
+) -> dict[str, list[dict]]:
+    """按代码归集池内记录：仍在跟踪的 + 近期命中延续的。
+
+    返回 {code: [{pool,status,entry_date,hit_date,is_live}, ...]}。
+    同一只票可能有多条（多池、或同池多次入池事件）。
+    """
+    out: dict[str, list[dict]] = {}
+    for key, model, statuses in LIVE_SPECS:
+        col = _entry_col(model)
+        stmt = select(model.code, model.status, col).where(model.status.in_(statuses))
         if since is not None:
-            # 三个池的「入池日」字段名不同
-            col = (model.pullback_date if model is WatchPullback
-                   else model.trigger_date)
             stmt = stmt.where(col >= since)
-        out[key] = set(session.scalars(stmt).all())
+        for code, st, entry in session.execute(stmt).all():
+            out.setdefault(code, []).append(
+                dict(pool=key, status=st, entry_date=entry,
+                     hit_date=None, is_live=True)
+            )
+    if hit_since is not None:
+        for key, model in HIT_SPECS:
+            col = _entry_col(model)
+            for code, st, entry, hd in session.execute(
+                select(model.code, model.status, col, model.hit_date).where(
+                    model.status == "hit",
+                    model.hit_date.isnot(None),
+                    model.hit_date >= hit_since,
+                )
+            ).all():
+                out.setdefault(code, []).append(
+                    dict(pool=key, status=st, entry_date=entry,
+                         hit_date=hd, is_live=False)
+                )
     return out
 
 
@@ -78,6 +127,10 @@ def pool_limitup(
         description="只统计最近N天入池的票（0=不限）。默认30天，"
                     "避免翻出几个月前入池、早已与当下无关的老记录",
     ),
+    live_only: bool = Query(
+        False,
+        description="只看仍在跟踪的活信号，排除命中后延续期的票",
+    ),
     session: Session = Depends(get_session),
 ) -> list[PoolLimitupOut]:
     d = trade_date or _latest_limitup_date(session)
@@ -87,11 +140,13 @@ def pool_limitup(
     since = None
     if since_days:
         since = d.fromordinal(d.toordinal() - since_days)
+    hit_since = None if live_only else d.fromordinal(d.toordinal() - RECENT_HIT_DAYS)
 
-    pools = _pool_codes(session, since)
+    records = _pool_records(session, since, hit_since)
     if pool:
-        pools = {k: v for k, v in pools.items() if k == pool}
-    all_codes = set().union(*pools.values()) if pools else set()
+        records = {c: [r for r in rs if r["pool"] == pool] for c, rs in records.items()}
+        records = {c: rs for c, rs in records.items() if rs}
+    all_codes = set(records)
     if not all_codes:
         return []
 
@@ -107,9 +162,12 @@ def pool_limitup(
 
     outs: list[PoolLimitupOut] = []
     for r in rows:
+        recs = sorted(records.get(r.code, []),
+                      key=lambda x: (not x["is_live"], x["pool"]))
         outs.append(PoolLimitupOut(
             code=r.code, name=r.name,
-            pools=sorted(k for k, codes in pools.items() if r.code in codes),
+            pools=sorted({x["pool"] for x in recs}),
+            pool_detail=[PoolLimitupPoolRef(**x) for x in recs],
             is_sealed_now=r.is_sealed_now,
             open_times=r.open_times or 0,
             boards=r.boards,
@@ -121,8 +179,10 @@ def pool_limitup(
             snapshot_at=r.snapshot_at,
             in_favorite=r.code in fav,
         ))
-    # 封着的排前面；同为封着则连板多的在前；再按炸板次数少的在前
+    # 活信号排在命中延续之前（前者是「报警后真涨了」，提示价值更高）；
+    # 再按封着的优先、连板多的优先、炸板次数少的优先
     outs.sort(key=lambda o: (
+        0 if any(x.is_live for x in o.pool_detail) else 1,
         0 if o.is_sealed_now else 1,
         -(o.boards or 0),
         o.open_times,
@@ -143,8 +203,9 @@ def pool_limitup_stats(
     since = None
     if since_days:
         since = d.fromordinal(d.toordinal() - since_days)
-    pools = _pool_codes(session, since)
-    all_codes = set().union(*pools.values()) if pools else set()
+    hit_since = d.fromordinal(d.toordinal() - RECENT_HIT_DAYS)
+    records = _pool_records(session, since, hit_since)
+    all_codes = set(records)
 
     total = session.scalar(
         select(func.count()).select_from(LimitupStock)
@@ -166,9 +227,19 @@ def pool_limitup_stats(
         sealed=sum(1 for r in rows if r.is_sealed_now),
         broken=sum(1 for r in rows if r.is_sealed_now is False),
         by_pool={
-            k: sum(1 for r in rows if r.code in codes)
-            for k, codes in pools.items()
+            key: sum(1 for r in rows
+                     if any(x["pool"] == key for x in records.get(r.code, [])))
+            for key, _, _ in LIVE_SPECS
         },
+        live_signals=sum(
+            1 for r in rows
+            if any(x["is_live"] for x in records.get(r.code, []))
+        ),
+        recent_hits=sum(
+            1 for r in rows
+            if records.get(r.code) and not any(
+                x["is_live"] for x in records.get(r.code, []))
+        ),
         snapshot_at=snap,
         # 数据不是当天的 → 前端应提示「非实时」，避免把昨天的涨停当成今天的
         is_stale=d != date.today(),

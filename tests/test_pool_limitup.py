@@ -186,3 +186,131 @@ def test_empty_when_no_limitup_data(session, client):
     _pullback(session, "600015", "池里有票")
     session.commit()
     assert client.get("/api/pool-limitup").json() == []
+
+
+# ---------------------------------------------------------------------------
+# 终态不应被标记（2026-09-18 回归）
+#
+# 原实现把 hit/settled 也算作「有效池内状态」，靠 trigger_date 落在 30 天窗口
+# 内就标记。实测当日 30 只标记里 15 只是观测窗口早已走完的归档样本——它们
+# 今天涨停与当初那次入池无关。修复后降到 20 只（活信号16 + 命中延续4）。
+# ---------------------------------------------------------------------------
+
+
+def test_settled_pullback_not_marked(session, client):
+    """回踩池 settled = 10日窗口已走完，不再是活信号。
+
+    这是虚增的主因：pullback 表里 settled 有 12030 条、triggered 仅 480 条，
+    终态是活跃态的 25 倍，全放进来等于池子失去筛选意义。
+    """
+    _pullback(session, "600020", "已结算", pb=date(2026, 9, 8))
+    session.query(WatchPullback).filter_by(code="600020").update(
+        {"status": "settled"})
+    _lu(session, "600020", "已结算")
+    session.commit()
+
+    assert client.get("/api/pool-limitup").json() == []
+
+
+def test_settled_lowvol_not_marked(session, client):
+    """低位放量池 settled 同理——HORIZON=10 交易日后必然结算。"""
+    session.add(WatchLowvol(
+        code="600021", name="放量已结算", board_group="main",
+        trigger_date=date(2026, 9, 8), trigger_close=10.0,
+        gain_from_low=5.0, vol_ratio=2.5, status="settled",
+    ))
+    _lu(session, "600021", "放量已结算")
+    session.commit()
+
+    assert client.get("/api/pool-limitup").json() == []
+
+
+def test_recent_hit_kept_as_continuation(session, client):
+    """近期命中的票保留，标为「命中延续」而非活信号。
+
+    实测古越龙山 600059：09-16 命中、09-18 又涨停——这是命中后的连续走强，
+    正是「跟随第二波」想抓的，不该一刀切掉。
+    """
+    _watchpool(session, "600022", "刚命中", td=date(2026, 9, 1))
+    session.query(WatchPool).filter_by(code="600022").update(
+        {"status": "hit", "hit_date": date(2026, 9, 13), "hit_days": 8})
+    _lu(session, "600022", "刚命中")
+    session.commit()
+
+    rows = client.get("/api/pool-limitup").json()
+    assert [r["code"] for r in rows] == ["600022"]
+    det = rows[0]["pool_detail"]
+    assert len(det) == 1
+    assert det[0]["status"] == "hit"
+    assert det[0]["hit_date"] == "2026-09-13"
+    assert det[0]["is_live"] is False          # 延续期，不是活信号
+
+
+def test_stale_hit_excluded(session, client):
+    """命中已超 RECENT_HIT_DAYS 的陈年旧账剔除——按 hit_date 卡，不是入池日。
+
+    实测新宏泰 603016：08-28 命中距今 21 天，却因 trigger_date 落在 30 天
+    窗口内而被标记。口径必须分开：活跃态按入池日筛，终态按结束日筛。
+    """
+    _watchpool(session, "600023", "老命中", td=date(2026, 9, 2))
+    session.query(WatchPool).filter_by(code="600023").update(
+        {"status": "hit", "hit_date": date(2026, 8, 20), "hit_days": 5})
+    _lu(session, "600023", "老命中")
+    session.commit()
+
+    assert client.get("/api/pool-limitup").json() == []
+
+
+def test_live_only_excludes_continuation(session, client):
+    """live_only=true 只留仍在跟踪的，排除命中延续。"""
+    _pullback(session, "600024", "活信号", pb=date(2026, 9, 12))
+    _watchpool(session, "600025", "命中延续", td=date(2026, 9, 1))
+    session.query(WatchPool).filter_by(code="600025").update(
+        {"status": "hit", "hit_date": date(2026, 9, 13), "hit_days": 8})
+    _lu(session, "600024", "活信号")
+    _lu(session, "600025", "命中延续")
+    session.commit()
+
+    both = client.get("/api/pool-limitup").json()
+    assert {r["code"] for r in both} == {"600024", "600025"}
+    # 活信号排在命中延续之前
+    assert both[0]["code"] == "600024"
+
+    live = client.get("/api/pool-limitup?live_only=true").json()
+    assert [r["code"] for r in live] == ["600024"]
+
+
+def test_live_record_survives_alongside_stale_hit(session, client):
+    """同一只票既有陈年 hit、又有活跃 triggered 时必须保留。
+
+    实测新宏泰 603016 正是此例：watch:hit 距今21天(该剔) +
+    pullback:triggered@09-07(仍在跟踪)。按每条记录分别判定，不能按代码一刀切。
+    """
+    _pullback(session, "600026", "双重身份", pb=date(2026, 9, 12))
+    _watchpool(session, "600026", "双重身份", td=date(2026, 9, 2))
+    session.query(WatchPool).filter_by(code="600026").update(
+        {"status": "hit", "hit_date": date(2026, 8, 20), "hit_days": 5})
+    _lu(session, "600026", "双重身份")
+    session.commit()
+
+    rows = client.get("/api/pool-limitup").json()
+    assert [r["code"] for r in rows] == ["600026"]
+    # 只剩回踩池那条活记录，过期的 watch:hit 不出现
+    assert rows[0]["pools"] == ["pullback"]
+    assert [d["is_live"] for d in rows[0]["pool_detail"]] == [True]
+
+
+def test_stats_splits_live_and_hits(session, client):
+    """stats 要能分开报活信号与命中延续。"""
+    _pullback(session, "600027", "活信号", pb=date(2026, 9, 12))
+    _watchpool(session, "600028", "命中延续", td=date(2026, 9, 1))
+    session.query(WatchPool).filter_by(code="600028").update(
+        {"status": "hit", "hit_date": date(2026, 9, 13), "hit_days": 8})
+    _lu(session, "600027", "活信号")
+    _lu(session, "600028", "命中延续")
+    session.commit()
+
+    st = client.get("/api/pool-limitup/stats").json()
+    assert st["in_pools"] == 2
+    assert st["live_signals"] == 1
+    assert st["recent_hits"] == 1

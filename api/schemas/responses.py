@@ -671,6 +671,20 @@ class FavoriteOut(ORMModel):
     updated_at: Optional[datetime] = None
 
 # ---------------- 监控池 × 今日涨停 ----------------
+class PoolLimitupPoolRef(BaseModel):
+    """一条池内记录的来源说明——让前端能区分「新信号」与「命中后延续」。
+
+    只有 pools:["watch"] 这种光秃秃的池名时，两者在界面上长得一模一样，
+    2026-09-18 的虚假标记问题正是因此藏了很久（当日 30 只标记里 15 只
+    是早已结算的终态）。故把入池日与状态一并返回。
+    """
+    pool: str                                 # pullback / watch / lowvol
+    status: str                               # watching / triggered / hit
+    entry_date: Optional[date] = None         # 入池日(回踩池=pullback_date)
+    hit_date: Optional[date] = None           # 命中日，仅 status=hit 有值
+    is_live: bool = False                     # True=仍在跟踪 False=命中后延续期
+
+
 class PoolLimitupOut(ORMModel):
     """监控池里今日涨停(或曾摸板)的标的。
 
@@ -682,11 +696,17 @@ class PoolLimitupOut(ORMModel):
         is_sealed_now=False 今天摸过板但现在没封住（炸板）
     `open_times>0` 表示今天炸过几次——**即使当前封着也可能非零**
     （封→炸→再封）。这是判断封板结不结实的关键。
+
+    **池内记录只含「仍在跟踪」与「近期命中」两类**，已结算的历史样本
+    （settled / expired / 旧 hit）不再标记——它们的观测窗口早已走完，
+    今天涨停与当初那次入池无关。详见 pool_detail。
     """
     code: str
     name: str
     # 该票出现在哪些监控池里（pullback/watch/lowvol，可多个）
     pools: List[str] = []
+    # 每条池内记录的明细（入池日/状态/是否仍在跟踪），与 pools 等价但更完整
+    pool_detail: List[PoolLimitupPoolRef] = []
     # ---- 涨停状态 ----
     is_sealed_now: Optional[bool] = None      # 当前是否封板
     open_times: int = 0                       # 炸板次数(只增不减)
@@ -709,6 +729,8 @@ class PoolLimitupStatsOut(BaseModel):
     sealed: int = 0                           # 当前封着的
     broken: int = 0                           # 炸板的
     by_pool: Dict[str, int] = {}              # 各池命中数
+    live_signals: int = 0                     # 其中仍在跟踪的(watching/triggered)
+    recent_hits: int = 0                      # 其中近期命中后延续的(hit)
     snapshot_at: Optional[datetime] = None
     is_stale: bool = False                    # 数据是否已过时(非当日)
 
