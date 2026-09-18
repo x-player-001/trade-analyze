@@ -68,31 +68,61 @@ LOOKBACK = 30         # 为算 MA10 需要回看的交易日数（>MA_WINDOW 留
 
 
 def to_thscode(code: str) -> str:
-    """6位代码 → 同花顺 thscode。60/68→SH，0/3→SZ，4/8→BJ。"""
-    if code.startswith(("60", "68", "9")):
+    """6位代码 → 同花顺 thscode。
+
+    【920 是北交所，不是上交所】北交所代码有三段：老的 43/83/87/88 开头，
+    以及 2024 年起启用的 **920** 段。曾把 `9` 开头一律映射成 .SH，
+    结果 920001 被当成上交所票，接口直接报 `code=1002 Unknown A-share
+    thscode: 920001.SH`——且一条坏码会让整批 400 只全部失败。
+
+    上交所的 9 开头是 B 股（900xxx），本项目不涉及，不单独处理。
+    """
+    if code.startswith("920") or code.startswith(("43", "83", "87", "88")):
+        return f"{code}.BJ"
+    if code.startswith(("60", "68")):
         return f"{code}.SH"
     if code.startswith(("4", "8")):
         return f"{code}.BJ"
     return f"{code}.SZ"
 
 
+def _collect(src: HithinkSource, batch: list[str],
+             out: dict[str, tuple[float, float | None]]) -> None:
+    for r in src.stock_snapshot(batch):
+        tk = str(r.get("ticker") or "").zfill(6)
+        lp = r.get("last_price")
+        if not tk or lp in (None, 0):
+            continue
+        # turnover 是成交额（与库内 amount 对应），别被命名骗了
+        out[tk] = (float(lp), float(r["turnover"]) if r.get("turnover") else None)
+
+
 def _live_prices(codes: list[str]) -> dict[str, tuple[float, float | None]]:
-    """取实时价 {code: (last_price, turnover)}。失败的批次跳过不中断。"""
+    """取实时价 {code: (last_price, turnover)}。
+
+    【一条坏码不能毁掉整批】接口对未知 thscode 直接整个请求报错
+    （实测 920001.SH 让 400 只全军覆没）。故批次失败后【逐只重试】，
+    只丢掉真正有问题的那几只——退市/停牌/代码段变更都会造成这种情况，
+    不能让它导致当天完全没有预警。
+    """
     src = HithinkSource()
     out: dict[str, tuple[float, float | None]] = {}
     for i in range(0, len(codes), SNAP_BATCH):
-        batch = [to_thscode(c) for c in codes[i : i + SNAP_BATCH]]
+        chunk = codes[i : i + SNAP_BATCH]
         try:
-            for r in src.stock_snapshot(batch):
-                tk = str(r.get("ticker") or "").zfill(6)
-                lp = r.get("last_price")
-                if not tk or lp in (None, 0):
-                    continue
-                # turnover 是成交额（与库内 amount 对应），别被命名骗了
-                out[tk] = (float(lp), float(r["turnover"])
-                           if r.get("turnover") else None)
-        except Exception:
-            log.exception("快照批次失败 (%d~%d)，跳过", i, i + SNAP_BATCH)
+            _collect(src, [to_thscode(c) for c in chunk], out)
+        except Exception as e:
+            log.warning("快照批次失败 (%d~%d): %s —— 转为逐只重试",
+                        i, i + len(chunk), str(e)[:120])
+            bad = []
+            for c in chunk:
+                try:
+                    _collect(src, [to_thscode(c)], out)
+                except Exception:
+                    bad.append(c)
+            if bad:
+                log.warning("以下 %d 只取价失败，本次跳过: %s",
+                            len(bad), ",".join(bad[:20]))
     return out
 
 

@@ -234,3 +234,52 @@ def test_alerts_filter_by_rhythm(session, client):
     session.commit()
     rows = client.get("/api/pullback/alerts?rhythm=%E6%80%A5").json()
     assert len(rows) == 1 and rows[0]["rhythm"] == "急"
+
+
+# ---------------------------------------------------------------------------
+# thscode 映射与批次容错（2026-09-19 实跑暴露）
+# ---------------------------------------------------------------------------
+
+def test_bse_920_maps_to_bj_not_sh():
+    """920 段是北交所，不是上交所。
+
+    曾把 `9` 开头一律映射成 .SH，实跑时 920001.SH 让接口报
+    `code=1002 Unknown A-share thscode`，且**一条坏码令整批 400 只全失败**。
+    """
+    assert live.to_thscode("920001") == "920001.BJ"
+    assert live.to_thscode("920108") == "920108.BJ"
+
+
+def test_thscode_mapping_all_boards():
+    assert live.to_thscode("600519") == "600519.SH"
+    assert live.to_thscode("688981") == "688981.SH"
+    assert live.to_thscode("000001") == "000001.SZ"
+    assert live.to_thscode("300750") == "300750.SZ"
+    assert live.to_thscode("301234") == "301234.SZ"
+    assert live.to_thscode("830799") == "830799.BJ"
+    assert live.to_thscode("430047") == "430047.BJ"
+
+
+def test_one_bad_code_does_not_kill_whole_batch(monkeypatch):
+    """批次里有坏码时逐只重试，只丢坏的那只。
+
+    退市/停牌/代码段变更都会造成整批报错，不能让它导致当天完全没有预警。
+    """
+    calls = []
+
+    class FakeSrc:
+        def stock_snapshot(self, codes):
+            calls.append(list(codes))
+            if len(codes) > 1:
+                raise RuntimeError("code=1002 Unknown A-share thscode")
+            c = codes[0]
+            if c.startswith("999"):
+                raise RuntimeError("code=1002 Unknown")
+            return [{"ticker": c.split(".")[0], "last_price": 10.0,
+                     "turnover": 1.0e8}]
+
+    monkeypatch.setattr(live, "HithinkSource", lambda: FakeSrc())
+    got = live._live_prices(["600001", "999999", "600002"])
+    assert set(got) == {"600001", "600002"}      # 坏码被跳过，好的都拿到
+    assert got["600001"][0] == 10.0
+    assert len(calls) == 4                        # 1次整批 + 3次逐只
