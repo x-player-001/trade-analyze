@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import signal
 from datetime import date
 
 from sqlalchemy import func, select
@@ -35,10 +36,27 @@ log = setup_logging("daily_pipeline")
 
 VERSIONS = ["v1", "v2"]   # A套(不看板块) / B套(结合板块)
 
+# 整条管线的墙钟上限。正常跑完约 3~5 分钟，给 40 分钟余量。
+# **必须有这道闸**：2026-09-22 的 cron 卡在 fetch_sentiment(akshare 无超时)
+# 整整 13 小时，进程一直占着 232MB 不退，其后所有步骤(含 LLM 复盘)全没跑，
+# 且第二天 18:30 还会再起一个——不设上限就会越堆越多。
+PIPELINE_TIMEOUT = 40 * 60
+
+
+def _alarm(signum, frame):  # noqa: ARG001
+    raise TimeoutError(f"每日管线超过 {PIPELINE_TIMEOUT}s 未完成，强制中止")
+
 
 def main() -> None:
     today = date.today()
     log.info("===== 每日管线启动 %s =====", today)
+
+    # SIGALRM 只在主线程的 Unix 上可用；Windows 本地跑测试时静默跳过。
+    try:
+        signal.signal(signal.SIGALRM, _alarm)
+        signal.alarm(PIPELINE_TIMEOUT)
+    except (AttributeError, ValueError):
+        log.warning("本平台不支持 SIGALRM，管线无墙钟保护")
 
     # 1. 数据更新：只拉日线(tushare 一次全市场当日,秒级,境外可连,不逐票)。
     #    只填原始价 raw_*,复权列留空;因子/验证均已切原始价计算。
@@ -124,6 +142,10 @@ def main() -> None:
     except Exception:
         log.exception("LLM 复盘失败")
 
+    try:
+        signal.alarm(0)          # 正常结束，撤掉闹钟
+    except (AttributeError, ValueError):
+        pass
     log.info("===== 每日管线结束 =====")
 
 

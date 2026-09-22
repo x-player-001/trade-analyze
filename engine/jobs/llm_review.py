@@ -127,7 +127,8 @@ def fetch_triggered(session, trade_date: date, only_default: bool = True,
         SELECT code, name, gain_from_low, vol20, streak_days, streak_gain,
                breakout_vol_ratio, pullback_vol_ratio, drawdown_from_peak,
                dist_ma5, dist_ma10, dist_ma20, rhythm, pullback_days,
-               breakout_date, streak_end_date, breakout_boards, first_board
+               breakout_date, streak_end_date, breakout_boards, first_board,
+               breakout_open
         FROM watch_pullback
         WHERE pullback_date = :d {cond}
         ORDER BY vol20 LIMIT :n
@@ -173,7 +174,9 @@ def fetch_triggered(session, trade_date: date, only_default: bool = True,
                 "gain_from_low", "vol20", "streak_days", "streak_gain",
                 "breakout_vol_ratio", "pullback_vol_ratio",
                 "drawdown_from_peak", "dist_ma5", "dist_ma10", "dist_ma20",
-                "rhythm", "pullback_days", "breakout_boards", "first_board")},
+                "rhythm", "pullback_days", "breakout_boards", "first_board",
+                # 支撑位计算要用：启动段首开盘(失效线)、段首/段末(定位最大量K线)
+                "breakout_open", "breakout_date", "streak_end_date")},
         ))
     return out
 
@@ -312,37 +315,116 @@ def _fmt_heat(h: dict) -> str:
     return "\n".join(lines)
 
 
-STOCK_SYSTEM = """你是A股短线复盘助手。依据《平庸时刻》成交量框架分析个股，规则如下：
+# 本池实测基准——**这些是 prompt 的锚**。没有基准，模型只能凭感觉说
+# 「概率较大」，无从校验；有了基准，它的结论才可追溯到哪一档。
+# 数据来自 13688 条公允样本(见 memory/timing-vs-pattern-magnitude)。
+BASE_RATE = 11.5        # 全池:回踩后10个交易日内再涨停的比例%
+TIER_TABLE = """本池实测基准（n=13688，公允世代）——判断必须对照这张表：
+  全池基础概率              11.5%
+  节奏分型：  急 26.6% / 中 12.5% / 缓 8.2%
+  连板数：    孤板 17.6% / 2连板 36.1% / 3+连板 37.2%
+  回踩日量能：缩量<0.5x 12.0% / 0.5-0.8x 17.8% / 0.8-1.2x 24.9% / ≥2x 34.9%
+  是否破位：  未破位 14.6% / 已破位 7.5%
+  启动前波动：vol20<1.5 偏好 / vol20>4 明显差
+⚠️ 整池 T+10 平均 −0.47%，跑输同期全市场 +1.05%。高于基准≠正期望。"""
 
-【读量顺序，不可乱】趋势 → 位置 → 价格 → 量能 → 验证
 
-【核心原则】
-1. 量是证据不是答案，单一指标不产生结论
-2. 位置决定解释方向——同一量能值在低位和高位含义相反
-3. 放量≠资金流入。每笔成交都有买卖双方，量表达的是该价位筹码交换的活跃度，
-   判断方向要看交换之后价格站在哪一边
+def calc_supports(st: Stock, facts: dict) -> list[dict]:
+    """用规则算出支撑位——**不让模型从K线里自己找价格,它会算错**。
 
-【五种量价组合（位置决定含义）】
-- 价涨量增：低位=突破 / 中段=趋势强化 / 高位=分歧加剧
-- 价涨量缩：二义。①强势(卖压小) ②弱势(热度下降)。需看后续有无新增量
-- 价跌量增：长期大跌后=恐慌释放可能成底 / 下跌趋势中=卖压重
-- 价跌量缩：二义。①抛压减弱 ②资金撤离。不等于见底，需价格结构先改变
-- 巨量横盘：长期下跌后=承接增强 / 连续大涨后=套牢抛压重
+    模型只负责解读强弱与重叠关系,价格由这里给准。
+    """
+    kl = st.kline
+    if not kl:
+        return []
+    last = kl[-1]["c"]
+    out: list[dict] = []
 
-【个股与板块的关联，三种情形含义不同】
-- 个股回踩 + 板块升温/持续 → 同步，板块在托
-- 个股回踩 + 板块退潮 → 背离，个股随板块一起走弱
-- 个股启动段恰好对应板块的单日脉冲(一日游) → ⚠️ 这次启动可能只是蹭脉冲，性质可疑
+    def add(price, label, note=""):
+        if price and price > 0:
+            out.append({"price": float(price), "label": label, "note": note,
+                        "dist": (float(price) / last - 1) * 100})
 
-判断关联时要**对齐时间轴**：看个股启动段落在板块序列的哪几天。
-板块序列只有 8 个交易日，不要把它说成"长期趋势"。
-若未提供概念热度，直接说"无板块数据"，**不要凭训练知识猜它属于什么板块**。
+    # 1) 均线——回踩池本就是 MA10 触发
+    for ma, key in (("MA5", "dist_ma5"), ("MA10", "dist_ma10"), ("MA20", "dist_ma20")):
+        d = facts.get(key)
+        if d is not None:
+            add(last / (1 + float(d) / 100), ma, "均线")
+
+    # 2) 启动段首日开盘价——破此位状态机判 failed,是形态失效线
+    bo = facts.get("breakout_open")
+    if bo:
+        add(bo, "启动段首开盘", "★破此位形态失效")
+
+    # 3) 启动段内最大量那根的实体顶/底——老严规则的参照K线
+    bd, se = facts.get("breakout_date"), facts.get("streak_end_date")
+    if bd and se:
+        seg = [b for b in kl if bd <= b["d"] <= se]
+        if seg:
+            mx = max(seg, key=lambda b: b["vol"])
+            add(min(mx["o"], mx["c"]), f"最大量K线实体底 {mx['d']:%m-%d}", "参照K线")
+            add(max(mx["o"], mx["c"]), f"最大量K线实体顶 {mx['d']:%m-%d}", "参照K线")
+
+    # 4) 启动前横盘平台上沿(启动段之前 20 日的高点密集区)
+    if bd:
+        pre = [b for b in kl if b["d"] < bd][-20:]
+        if len(pre) >= 5:
+            add(max(b["h"] for b in pre), "启动前平台上沿", "前期套牢/支撑转换")
+
+    # 只留在现价下方或贴近(+1%以内)的,按距离近→远排
+    out = [x for x in out if x["dist"] <= 1.0]
+    out.sort(key=lambda x: -x["price"])
+    return out[:6]
+
+
+def detect_anomalies(st: Stock) -> list[str]:
+    """量价异常——用户明确要求提示。都是规则判定,不靠模型眼力。"""
+    kl = st.kline
+    if len(kl) < 6:
+        return []
+    out = []
+    for b in kl[-6:]:
+        d, pct, vr = b["d"], b["pct"], b["vr"]
+        rng = (b["h"] - b["l"]) / b["c"] * 100 if b["c"] else 0
+        if vr >= 3 and abs(pct) < 2:
+            out.append(f"{d:%m-%d} 量比{vr:.1f}倍却仅{pct:+.1f}% — 巨量滞涨，分歧加剧")
+        elif vr >= 2.5 and pct < 0:
+            out.append(f"{d:%m-%d} 量比{vr:.1f}倍收跌{pct:.1f}% — 放量下跌，卖压重")
+        elif vr <= 0.4 and pct > 3:
+            out.append(f"{d:%m-%d} 量比仅{vr:.2f}却涨{pct:+.1f}% — 缩量拉升，无量上涨存疑")
+        elif rng >= 9 and abs(pct) < 3:
+            out.append(f"{d:%m-%d} 振幅{rng:.1f}%收{pct:+.1f}% — 长影线，多空分歧大")
+    return out[:4]
+
+
+STOCK_SYSTEM = """你是A股短线交易助手。分析对象是「突破回踩池」的票：
+底部启动 → 回调至均线附近 → 等待第二波。用户要的是**判断**，不是现状描述。
+
+【必须回答三件事，按此顺序，不要写别的】
+
+一、强支撑在哪里
+   支撑位已算好传给你，**不要自己从K线里找价格**。你负责：
+   - 挑出最关键的 2~3 个（离现价近的、多个重叠的更强）
+   - 说明重叠情况：两个支撑相距 2% 以内即构成「密集支撑带」，更可靠
+   - 明确指出**形态失效线**（标★的那个），破了就不用再看
+
+二、第二波概率（给档位，不要编精确数字）
+   对照给你的基准表，定位这只票落在哪几档，然后给出档位：
+     显著高于基准 / 高于基准 / 接近基准 / 低于基准 / 显著低于基准
+   **必须说明依据**：列出它命中的档位值，指出各档指向是否一致。
+   各档冲突时要说「信号矛盾，不确定性高」，不要强行下结论。
+   ⚠️ 基准 11.5% 本身就低，且整池跑输大盘——「高于基准」不等于值得做。
+
+三、量价异常
+   已算好传给你。逐条说明它在当前位置的含义（同一异常在低位和高位含义相反）。
+   没有异常就说「无显著异常」，不要硬凑。
 
 【硬性要求】
-- 二义的组合必须**明确指出是二义**，不要单选一边
-- 只描述当前量价结构与板块关联，**不预测涨跌、不给买卖建议、不给目标价**
-- 结论须可回查：引用具体日期和数值
-- 全文 200 字以内，不要分点罗列，写成连贯的三四句话"""
+- 用短标题分三段写，每段 2~3 句，全文 300 字以内
+- 所有价格、比例、日期必须来自给定数据，**不得自己计算或估算**
+- 不给目标价、不给仓位建议、不说「建议买入/卖出」
+- 概率只给档位，不要写「约30%」这种编出来的精确值
+- 板块数据若为空，直接说「无板块数据」，不要凭训练知识猜它属于什么板块"""
 
 CONCEPT_SYSTEM = """你是A股盘后复盘助手，依据《平庸时刻》板块轮动框架总结当日概念热度。
 
@@ -369,6 +451,18 @@ def review_stock(s: Stock, concepts, heat: Optional[dict] = None) -> Optional[st
         con_block = _fmt_heat(heat)
     else:
         con_block = "所属概念：" + (", ".join(concepts) if concepts else "无映射")
+
+    last = s.kline[-1]["c"] if s.kline else 0.0
+    sups = calc_supports(s, f)
+    sup_block = "\n".join(
+        "  {:.2f}  {:+.2f}%  {}{}".format(
+            x["price"], x["dist"], x["label"],
+            f"  [{x['note']}]" if x["note"] else "")
+        for x in sups
+    ) or "  （无法算出有效支撑）"
+    ano_block = "\n".join(
+        "  " + a for a in detect_anomalies(s)) or "  无显著异常"
+
     prompt = f"""个股：{s.name}（{s.code}）
 
 【所属概念的当日热度】
@@ -385,10 +479,18 @@ def review_stock(s: Stock, concepts, heat: Optional[dict] = None) -> Optional[st
 - 启动段前60日无涨停：{fb}
 - 回踩节奏分型：{f['rhythm'] or "未分型"}；启动段末到回踩共 {f['pullback_days'] or 0} 个交易日
 
+【支撑位】（已算好，现价 {last:.2f}；★=形态失效线，破了作废）
+{sup_block}
+
+【量价异常】（已扫近6日）
+{ano_block}
+
+{TIER_TABLE}
+
 【日线序列】（原始价，未复权；量比=当日量÷前20日均量）
 {_fmt_kline(s.kline)}
 
-请按读量顺序分析这只票当前的量价结构，并说明它与所属板块热度的关联。"""
+请按「一、强支撑 二、第二波概率 三、量价异常」三段作答。"""
     return _call_llm(prompt, STOCK_SYSTEM)
 
 

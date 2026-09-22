@@ -19,6 +19,7 @@ memory 里"东财封境外IP全不通"的记录不准确：几十到几百行的
 from __future__ import annotations
 
 import argparse
+import socket
 import time
 from datetime import date
 
@@ -41,6 +42,9 @@ from engine.factors.sentiment import (
 log = setup_logging("fetch_sentiment")
 
 SLEEP = 1.0     # 东财接口间隔，避免触发限流
+# akshare 不给超时参数，用 socket 默认值兜底。30s 足够（正常 1~3s），
+# 超了就当这个池抓失败——**宁可缺一天数据，也不能挂住整条管线**。
+AK_TIMEOUT = 30.0
 
 
 def _parse_boards(v) -> int:
@@ -57,10 +61,28 @@ def _f(v):
 
 
 def fetch_raw_day(trade_date: date) -> tuple[dict, list[dict]]:
-    """抓单日原始数据。返回 (计数dict, 涨停明细rows)。阶段判定在上层统一做。"""
+    """抓单日原始数据。返回 (计数dict, 涨停明细rows)。阶段判定在上层统一做。
+
+    ⚠️ **akshare 内部的 requests 不设超时**，对端接受连接后不回数据时会**永久阻塞**。
+    下面的 try/except 拦不住——挂起不是异常。实测 2026-09-22 的 cron 因此卡在
+    本函数 **13 小时**（ESTAB 连到 120.76.218.228:443 一直不断），
+    导致管线第 6 步之后（含 LLM 复盘）全部没跑。
+
+    故用 `socket.setdefaulttimeout` 兜底：它对所有新建 socket 生效，
+    akshare 用什么 HTTP 库都挡得住。函数退出时恢复原值，不污染其他模块。
+    """
     import akshare as ak
 
     ds = trade_date.strftime("%Y%m%d")
+    _prev_to = socket.getdefaulttimeout()
+    socket.setdefaulttimeout(AK_TIMEOUT)
+    try:
+        return _fetch_raw_day_inner(ak, trade_date, ds)
+    finally:
+        socket.setdefaulttimeout(_prev_to)
+
+
+def _fetch_raw_day_inner(ak, trade_date: date, ds: str) -> tuple[dict, list[dict]]:
     zt = zb = prev = strong = pd.DataFrame()
     for name, fn, tgt in [
         ("涨停池", lambda: ak.stock_zt_pool_em(date=ds), "zt"),
