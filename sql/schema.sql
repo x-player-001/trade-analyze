@@ -667,5 +667,5 @@ CREATE TABLE IF NOT EXISTS llm_review (
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   UNIQUE KEY uq_llm_date_kind_code (trade_date, kind, code),
   KEY idx_llm_date (trade_date)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
   COMMENT='盘后LLM复盘输出。只作展示,不参与选股决策';

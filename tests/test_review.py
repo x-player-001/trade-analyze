@@ -169,3 +169,19 @@ def test_fetch_triggered_any_status(pooled, rv):
     got = fetch_triggered(rv, pooled, only_default=False, limit=10,
                           any_status=True)
     assert len(got) == 1 and got[0].code == "600516"
+
+
+def test_schema_sql_collation_consistent():
+    """**回归**:新建表的 collation 必须与其余表一致。
+
+    llm_review 曾用 utf8mb4_unicode_ci 建出来,而库内其余 25 张表都是
+    utf8mb4_0900_ai_ci,导致任何按 code 的 JOIN 直接报
+    「Illegal mix of collations」。建表时不显式指定会继承服务器默认,
+    与既有表分叉——这个坑 kline-api-and-collation 里记过一次,又踩了。
+    """
+    import re
+    from pathlib import Path
+    sql = Path(__file__).resolve().parents[1].joinpath("sql/schema.sql").read_text(
+        encoding="utf-8")
+    bad = set(re.findall(r"COLLATE=(utf8mb4_\w+)", sql)) - {"utf8mb4_0900_ai_ci"}
+    assert not bad, f"schema.sql 出现不一致的 collation: {bad}"
