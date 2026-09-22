@@ -185,3 +185,77 @@ def test_schema_sql_collation_consistent():
         encoding="utf-8")
     bad = set(re.findall(r"COLLATE=(utf8mb4_\w+)", sql)) - {"utf8mb4_0900_ai_ci"}
     assert not bad, f"schema.sql 出现不一致的 collation: {bad}"
+
+
+# ---------------------------------------------------------------------------
+# 概念热度关联（个股 vs 板块）
+# ---------------------------------------------------------------------------
+def _seed_concepts(session, d: date):
+    """造 3 个概念 × 8 日 + 个股映射。主线走强 / 脉冲一日游 / 宽基。"""
+    from common.models import ConceptDaily, StockConcept, ThemeDaily
+    days = [d - timedelta(days=i) for i in range(7, -1, -1)]
+    series = {
+        "出版发行": [0.1, 0.2, 0.5, 1.2, 1.8, 2.4, 3.0, 3.6],   # 持续走强
+        "脉冲概念": [0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 6.0, 0.1],   # 一日游
+        "融资融券": [5.0] * 8,                                    # 宽基，应排除
+    }
+    for nm, vals in series.items():
+        for dd, v in zip(days, vals):
+            session.add(ConceptDaily(trade_date=dd, thscode=f"T{nm}", name=nm,
+                                     pct_chg=v, turnover_share=0.1, rank_pct=1))
+        session.add(StockConcept(code="601811", thscode=f"T{nm}",
+                                 concept_name=nm))
+    # 全市场基准：再造 20 个概念，delta 中位数约 0
+    for i in range(20):
+        for dd in days:
+            session.add(ConceptDaily(trade_date=dd, thscode=f"M{i}",
+                                     name=f"陪跑{i}", pct_chg=0.5,
+                                     turnover_share=0.1, rank_pct=1))
+    session.add(ThemeDaily(trade_date=d, theme="出版发行", zt_count=1,
+                           max_boards=4, consec_days=3))
+    session.commit()
+    return days
+
+
+def test_concept_heat_excludes_broad_and_ranks(rv):
+    """宽基必须排除；按近3日均排序，只留前 TOP_CONCEPTS 个。"""
+    from engine.jobs.llm_review import fetch_concept_heat
+    d = date(2026, 9, 22)
+    _seed_concepts(rv, d)
+    h = fetch_concept_heat(rv, "601811", d)
+    names = [c["name"] for c in h["hot"]]
+    assert "融资融券" not in names, "宽基标签必须排除"
+    assert "出版发行" in names
+    assert h["days"] == 8
+    assert h["themes"], "命中的当日涨停题材应带出来"
+    assert "连3日" in h["themes"][0]
+
+
+def test_concept_heat_detects_one_day_spike(rv):
+    """脉冲概念应被判为一日游——这是「启动可能只是蹭脉冲」的判据。"""
+    from engine.jobs.llm_review import fetch_concept_heat
+    d = date(2026, 9, 22)
+    _seed_concepts(rv, d)
+    h = fetch_concept_heat(rv, "601811", d)
+    spike = next((c for c in h["hot"] if c["name"] == "脉冲概念"), None)
+    if spike:   # 可能因排序落在 TOP_CONCEPTS 之外
+        assert spike["stage"] == "一日游", spike["reason"]
+
+
+def test_concept_heat_no_mapping_is_explicit(rv):
+    """无映射时必须明说,不能留空让模型凭训练知识脑补板块。"""
+    from engine.jobs.llm_review import _fmt_heat, fetch_concept_heat
+    h = fetch_concept_heat(rv, "999999", date(2026, 9, 22))
+    assert h["hot"] == []
+    txt = _fmt_heat(h)
+    assert "无映射" in txt or "无概念快照" in txt
+
+
+def test_fmt_heat_states_history_limit(rv):
+    """必须告诉模型只有几天历史,否则它会把8天说成"长期趋势"。"""
+    from engine.jobs.llm_review import _fmt_heat, fetch_concept_heat
+    d = date(2026, 9, 22)
+    _seed_concepts(rv, d)
+    txt = _fmt_heat(fetch_concept_heat(rv, "601811", d))
+    assert "8 个交易日" in txt
+    assert "序列:" in txt

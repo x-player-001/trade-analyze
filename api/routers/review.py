@@ -109,7 +109,7 @@ def analyze_stock(
     """
     # 延迟导入：engine 依赖较重，且只有真正要算时才需要
     from engine.jobs.llm_review import (
-        fetch_concepts, fetch_triggered, review_stock, save,
+        fetch_concept_heat, fetch_concepts, fetch_triggered, review_stock, save,
     )
     from common.config import settings
 
@@ -157,7 +157,10 @@ def analyze_stock(
     if not lst:
         raise HTTPException(422, f"{code} 在 {td} 的K线数据不足,无法分析")
 
-    content = review_stock(lst[0], fetch_concepts(session, code))
+    content = review_stock(
+        lst[0], fetch_concepts(session, code),
+        fetch_concept_heat(session, code, td),
+    )
     if not content:
         raise HTTPException(503, "模型调用失败,请稍后重试")
 

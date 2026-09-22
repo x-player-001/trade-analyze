@@ -32,8 +32,9 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Any, Optional
 
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 
+from api.routers.concept import _is_broad
 from common.config import settings
 from common.db import session_scope
 from common.logging_conf import get_logger
@@ -184,6 +185,133 @@ def fetch_concepts(session, code: str) -> list[str]:
     return [r[0] for r in rows]
 
 
+# 个股所属概念里只传最热的前 N 个。一只票平均挂 12 个概念，大部分是宽基或
+# 当日无热度的，全传会让噪音淹没信号、也浪费 token。
+TOP_CONCEPTS = 3
+
+
+def fetch_concept_heat(session, code: str, trade_date: date) -> dict:
+    """取该股所属概念的当日热度序列,用于判断「个股 vs 板块」的关联。
+
+    **模型自己查不到这些**:概念成分是同花顺特定体系(390个)且会变动,
+    当日涨跌/连涨天数更是训练数据里不存在的信息。故必须由库内传入——
+    同「位置/量比由规则算好」一个道理,能查准的事不交给模型猜。
+
+    返回 {hot: [...], cold_count: n, themes: [...], median_delta: x, days: n}
+    """
+    # **不能复用 fetch_concepts**：它有 LIMIT 12 且无 ORDER BY，在映射多的票上
+    # 会按库内顺序任意截断。实测新华文轩 601811 挂 22 个概念，被截掉 10 个，
+    # 热度排序只能在残缺集合里做——取全量再按热度排才对。
+    names = [r[0] for r in session.execute(text(
+        "SELECT DISTINCT concept_name FROM stock_concept WHERE code = :c"
+    ), {"c": code}).all()]
+    if not names:
+        return {"hot": [], "cold_count": 0, "themes": [], "days": 0}
+
+    real = [n for n in names if not _is_broad(n)]
+    if not real:
+        return {"hot": [], "cold_count": len(names), "themes": [], "days": 0}
+
+    dates = [d for (d,) in session.execute(text("""
+        SELECT trade_date FROM concept_daily
+        WHERE trade_date <= :d GROUP BY trade_date
+        ORDER BY trade_date DESC LIMIT 8
+    """), {"d": trade_date}).all()]
+    if not dates:
+        return {"hot": [], "cold_count": len(real), "themes": [], "days": 0}
+    dates = sorted(dates)
+
+    rows = session.execute(text("""
+        SELECT name, trade_date, pct_chg, turnover_share
+        FROM concept_daily
+        WHERE name IN :ns AND trade_date IN :ds
+    """).bindparams(
+        bindparam("ns", expanding=True), bindparam("ds", expanding=True),
+    ), {"ns": real, "ds": dates}).all()
+
+    seq: dict[str, dict] = {}
+    for nm, td, pct, share in rows:
+        seq.setdefault(nm, {})[td] = (float(pct or 0), share)
+
+    # 全市场 delta 中位数——阶段是相对它判的,不是绝对涨幅。
+    # 同 rotation_board:实测 390 个概念里 90% 的 delta 为正(大盘整体在涨)。
+    allrows = session.execute(text("""
+        SELECT name, trade_date, pct_chg FROM concept_daily
+        WHERE trade_date IN :ds
+    """).bindparams(bindparam("ds", expanding=True)), {"ds": dates}).all()
+    mkt: dict[str, list] = {}
+    for nm, td, pct in allrows:
+        mkt.setdefault(nm, []).append((td, float(pct or 0)))
+    deltas = []
+    for v in mkt.values():
+        s = [p for _, p in sorted(v)]
+        if len(s) >= 6:
+            deltas.append(sum(s[-3:]) / 3 - sum(s[-6:-3]) / 3)
+    deltas.sort()
+    median_delta = deltas[len(deltas) // 2] if deltas else 0.0
+
+    from api.routers.rotation import _stage
+
+    out = []
+    for nm, pts in seq.items():
+        s = [pts[d][0] for d in dates if d in pts]
+        if not s:
+            continue
+        avg3 = sum(s[-3:]) / len(s[-3:])
+        prev = s[-6:-3]
+        avg_prev3 = (sum(prev) / len(prev)) if prev else avg3
+        up = 0
+        for v in reversed(s):
+            if v > 0:
+                up += 1
+            else:
+                break
+        st, reason = _stage(avg3, avg_prev3, s, up, median_delta)
+        last = pts.get(dates[-1])
+        out.append({
+            "name": nm, "stage": st, "reason": reason, "avg3": avg3,
+            "up_days": up, "seq": s,
+            "share": (float(last[1]) if last and last[1] is not None else None),
+        })
+    out.sort(key=lambda x: -x["avg3"])
+
+    themes = [
+        f"{t}({z}只/连{c}日{'/新' if isnew else ''}{f'/最高{mb}板' if mb else ''})"
+        for t, z, mb, c, isnew in session.execute(text("""
+            SELECT theme, zt_count, max_boards, consec_days, is_new
+            FROM theme_daily WHERE trade_date = :d AND theme IN :ns
+        """).bindparams(bindparam("ns", expanding=True)),
+            {"d": trade_date, "ns": real}).all()
+    ]
+
+    return {
+        "hot": out[:TOP_CONCEPTS], "cold_count": max(0, len(real) - TOP_CONCEPTS),
+        "themes": themes, "median_delta": median_delta, "days": len(dates),
+    }
+
+
+def _fmt_heat(h: dict) -> str:
+    """把概念热度拼成 prompt 片段。无数据时明说,不留空让模型脑补。"""
+    if not h.get("hot"):
+        return "所属概念：无映射或当日无概念快照（不可据此判断板块关联）"
+    lines = [
+        f"（全市场 delta 中位数 {h['median_delta']:+.2f}，"
+        f"概念历史仅 {h['days']} 个交易日，趋势判定可靠性有限）"
+    ]
+    for c in h["hot"]:
+        s = " ".join(f"{v:+.1f}" for v in c["seq"])
+        share = f" 额占比{c['share']:.3f}%" if c["share"] is not None else ""
+        lines.append(
+            f"  {c['name']} [{c['stage']}] 近3日均{c['avg3']:+.2f}% "
+            f"连涨{c['up_days']}日{share}\n    序列: {s}\n    依据: {c['reason']}"
+        )
+    if h["cold_count"]:
+        lines.append(f"  （另有 {h['cold_count']} 个概念当日无显著热度，已略）")
+    if h["themes"]:
+        lines.append("  当日涨停题材命中：" + "、".join(h["themes"]))
+    return "\n".join(lines)
+
+
 STOCK_SYSTEM = """你是A股短线复盘助手。依据《平庸时刻》成交量框架分析个股，规则如下：
 
 【读量顺序，不可乱】趋势 → 位置 → 价格 → 量能 → 验证
@@ -201,11 +329,20 @@ STOCK_SYSTEM = """你是A股短线复盘助手。依据《平庸时刻》成交�
 - 价跌量缩：二义。①抛压减弱 ②资金撤离。不等于见底，需价格结构先改变
 - 巨量横盘：长期下跌后=承接增强 / 连续大涨后=套牢抛压重
 
+【个股与板块的关联，三种情形含义不同】
+- 个股回踩 + 板块升温/持续 → 同步，板块在托
+- 个股回踩 + 板块退潮 → 背离，个股随板块一起走弱
+- 个股启动段恰好对应板块的单日脉冲(一日游) → ⚠️ 这次启动可能只是蹭脉冲，性质可疑
+
+判断关联时要**对齐时间轴**：看个股启动段落在板块序列的哪几天。
+板块序列只有 8 个交易日，不要把它说成"长期趋势"。
+若未提供概念热度，直接说"无板块数据"，**不要凭训练知识猜它属于什么板块**。
+
 【硬性要求】
 - 二义的组合必须**明确指出是二义**，不要单选一边
-- 只描述当前量价结构，**不预测涨跌、不给买卖建议、不给目标价**
+- 只描述当前量价结构与板块关联，**不预测涨跌、不给买卖建议、不给目标价**
 - 结论须可回查：引用具体日期和数值
-- 全文 150 字以内，不要分点罗列，写成连贯的两三句话"""
+- 全文 200 字以内，不要分点罗列，写成连贯的三四句话"""
 
 CONCEPT_SYSTEM = """你是A股盘后复盘助手，依据《平庸时刻》板块轮动框架总结当日概念热度。
 
@@ -224,11 +361,18 @@ CONCEPT_SYSTEM = """你是A股盘后复盘助手，依据《平庸时刻》板�
 - 全文 250 字以内"""
 
 
-def review_stock(s: Stock, concepts: list[str]) -> Optional[str]:
+def review_stock(s: Stock, concepts, heat: Optional[dict] = None) -> Optional[str]:
+    """`concepts` 兼容旧签名(list[str]);传 heat 时用带热度的版本。"""
     f = s.facts
     fb = "是" if f.get("first_board") else "否"
+    if heat is not None:
+        con_block = _fmt_heat(heat)
+    else:
+        con_block = "所属概念：" + (", ".join(concepts) if concepts else "无映射")
     prompt = f"""个股：{s.name}（{s.code}）
-所属概念：{", ".join(concepts) if concepts else "无映射"}
+
+【所属概念的当日热度】
+{con_block}
 
 【已算好的关键数值】
 - 位置：距120日低点 +{f['gain_from_low']:.1f}%
@@ -244,7 +388,7 @@ def review_stock(s: Stock, concepts: list[str]) -> Optional[str]:
 【日线序列】（原始价，未复权；量比=当日量÷前20日均量）
 {_fmt_kline(s.kline)}
 
-请按读量顺序分析这只票当前的量价结构。"""
+请按读量顺序分析这只票当前的量价结构，并说明它与所属板块热度的关联。"""
     return _call_llm(prompt, STOCK_SYSTEM)
 
 
@@ -327,7 +471,10 @@ def run(trade_date: Optional[date] = None, *, stocks: bool = True,
                      "默认(vol20<=2.5且未破位)" if only_default else "全部")
             ok = 0
             for st in lst:
-                txt = review_stock(st, fetch_concepts(s, st.code))
+                txt = review_stock(
+                    st, fetch_concepts(s, st.code),
+                    fetch_concept_heat(s, st.code, trade_date),
+                )
                 if not txt:
                     log.warning("%s %s 分析失败", st.code, st.name)
                     continue
