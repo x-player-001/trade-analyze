@@ -773,3 +773,73 @@ class PoolLimitupStatsOut(BaseModel):
     snapshot_at: Optional[datetime] = None
     is_stale: bool = False                    # 数据是否已过时(非当日)
 
+
+
+# ---------------------------------------------------------------------------
+# 板块轮动看板（库内 concept_daily 历史序列，非实时）
+# ---------------------------------------------------------------------------
+class RotationPointOut(BaseModel):
+    """轮动矩阵里的一格：某概念某日的表现。"""
+    trade_date: date
+    pct_chg: float = 0.0
+    turnover_share: Optional[float] = None    # 成交额占比%(资金聚集度)
+    rank_pct: Optional[int] = None            # 当日涨幅排名
+
+
+class RotationConceptOut(BaseModel):
+    """一个概念的热度序列与阶段判定。
+
+    **stage 是规则判定不是预测**——它描述「这个概念现在处在什么位置」，
+    不回答「明天轮到谁」。轮动方向由催化事件驱动，不在价格数据里。
+
+    `peers` 是成分股高度重叠的同族概念。医药系实测 CRO概念×减肥药
+    重叠 23%，不去重会让榜单被同一条主线刷屏、看着像多个热点。
+    """
+    thscode: str
+    name: str
+    # ---- 当前热度 ----
+    pct_chg: float = 0.0                      # 最新日涨幅%
+    avg3: float = 0.0                         # 近3日均涨幅%(排序主键)
+    avg_prev3: float = 0.0                    # 前3日均涨幅%(算趋势用)
+    turnover_share: Optional[float] = None    # 最新日成交额占比%
+    share_trend: Optional[float] = None       # 占比变化=近3日均-前3日均
+    rank_pct: Optional[int] = None
+    # ---- 阶段 ----
+    stage: str = "持续"                        # 升温/持续/退潮/一日游
+    stage_reason: str = ""                    # 判定依据，前端可直接展示
+    up_days: int = 0                          # 近期连续上涨天数
+    max_day_pct: float = 0.0                  # 窗口内单日最大涨幅
+    # ---- 同族 ----
+    peers: List[str] = []                     # 成分重叠>=阈值的概念名
+    peer_count: int = 0
+    # ---- 序列 ----
+    series: List[RotationPointOut] = []        # 按日升序，供前端画热力图
+
+
+class RotationThemeOut(BaseModel):
+    """涨停原因侧的题材热度（theme_daily），与概念侧互为印证。"""
+    theme: str
+    zt_count: int = 0
+    max_boards: int = 0
+    consec_days: int = 1                      # 连续上榜天数，>=3 为持续主线
+    is_new: bool = False
+
+
+class RotationBoardOut(BaseModel):
+    """板块轮动看板总览。
+
+    **数据覆盖有限**：concept_daily 自 2026-09-10 起逐日积累，
+    `days_available` 如实返回可用天数——没有分母的序列无法解读。
+    窗口不足时 stage 判定会退化，前端应据此提示。
+    """
+    trade_date: Optional[date] = None
+    days_available: int = 0                   # 库内可用交易日数
+    window: int = 0                           # 本次实际使用的窗口天数
+    dates: List[date] = []                    # 矩阵的日期列
+    concepts: List[RotationConceptOut] = []
+    themes: List[RotationThemeOut] = []       # 当日涨停题材TOP
+    stage_counts: Dict[str, int] = {}         # 各阶段概念数，看整体轮动节奏
+    # 全市场 delta 中位数——stage 是相对它判的。实测 390 个概念里 90% 的
+    # delta 为正(大盘整体在涨)，用绝对阈值会把半数概念标成"升温"。
+    median_delta: float = 0.0
+    note: str = ""
