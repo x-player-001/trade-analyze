@@ -259,3 +259,36 @@ def test_fmt_heat_states_history_limit(rv):
     txt = _fmt_heat(fetch_concept_heat(rv, "601811", d))
     assert "8 个交易日" in txt
     assert "序列:" in txt
+
+
+def test_concept_save_is_idempotent_across_reruns(rv):
+    """**回归**:板块复盘重跑不能堆重复行。
+
+    code 存 NULL 时 MySQL 唯一索引允许无限多个 NULL,冲突键匹配不上——
+    实测 2026-09-23 重跑 09-22 时板块复盘一天内堆了 4 条。改用哨兵值占位。
+    """
+    from engine.jobs.llm_review import CONCEPT_CODE, save
+    d = date(2026, 9, 22)
+    for i in range(3):
+        save(rv, d, "concept", None, None, f"第{i}次板块复盘")
+    rv.commit()
+    n = rv.execute(text(
+        "SELECT COUNT(*) FROM llm_review WHERE kind='concept'")).scalar()
+    assert n == 1, f"重跑3次应仍只有1行,实际 {n} 行"
+    content = rv.execute(text(
+        "SELECT content FROM llm_review WHERE kind='concept'")).scalar()
+    assert content == "第2次板块复盘", "应保留最后一次的内容"
+    code = rv.execute(text(
+        "SELECT code FROM llm_review WHERE kind='concept'")).scalar()
+    assert code == CONCEPT_CODE
+
+
+def test_api_hides_concept_sentinel_code(rv):
+    """哨兵值是库内实现细节,前端应看到 code=None。"""
+    from engine.jobs.llm_review import save
+    d = date(2026, 9, 22)
+    save(rv, d, "concept", None, None, "板块复盘")
+    rv.commit()
+    out = R.review_day(trade_date=None, kind=None, session=rv)
+    assert out.concept is not None
+    assert out.concept.code is None, "哨兵值不该漏给前端"

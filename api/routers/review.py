@@ -37,9 +37,16 @@ log = get_logger("api.review")
 router = APIRouter(prefix="/api/review", tags=["review"])
 
 
+# 板块复盘在库里用哨兵值占 code（NULL 会让唯一键失效，重跑就堆重复行），
+# 但对前端应表现为「没有代码」。
+CONCEPT_CODE = "__board__"
+
+
 def _row_to_out(r) -> ReviewOut:
+    code = r["code"]
     return ReviewOut(
-        trade_date=r["trade_date"], kind=r["kind"], code=r["code"],
+        trade_date=r["trade_date"], kind=r["kind"],
+        code=(None if code == CONCEPT_CODE else code),
         name=r["name"], content=r["content"], model=r["model"] or "",
         created_at=r["created_at"],
     )

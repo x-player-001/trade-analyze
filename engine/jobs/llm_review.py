@@ -29,7 +29,7 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from typing import Any, Optional
 
 from sqlalchemy import bindparam, text
@@ -422,14 +422,23 @@ def review_concepts(board: dict) -> Optional[str]:
     return _call_llm(prompt, CONCEPT_SYSTEM)
 
 
+# 板块复盘没有股票代码，但**不能存 NULL**：MySQL 唯一索引允许无限多个 NULL，
+# 冲突键匹配不上，重跑一次就多一行。实测 2026-09-23 重跑 09-22 时板块复盘
+# 一天内堆了 4 条。用哨兵值占位，让 (trade_date, kind, code) 真正唯一。
+CONCEPT_CODE = "__board__"
+
+
 def save(session, trade_date: date, kind: str, code: Optional[str],
          name: Optional[str], content: str) -> None:
     """幂等写入。走 bulk_upsert 而非裸 SQL——ON DUPLICATE KEY 是 MySQL 方言,
     单测的 SQLite 跑不了。"""
     bulk_upsert(session, LlmReview, [dict(
-        trade_date=trade_date, kind=kind, code=code, name=name,
+        trade_date=trade_date, kind=kind, code=code or CONCEPT_CODE, name=name,
         content=content, model=settings.deepseek_model,
-    )], update_cols=["content", "model"])
+        created_at=datetime.now(),
+    # created_at 一并更新：重跑后它应反映「这条内容是什么时候生成的」，
+    # 否则前端看到的时间戳是首次生成时间，与实际内容对不上。
+    )], update_cols=["content", "model", "created_at"])
 
 
 def run(trade_date: Optional[date] = None, *, stocks: bool = True,
