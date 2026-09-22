@@ -651,3 +651,21 @@ CREATE TABLE IF NOT EXISTS watch_pullback_alert (
   KEY idx_wpba_date (alert_date),
   KEY idx_wpba_confirmed (confirmed)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='回踩池盘中预警(14:45)';
+
+-- LLM 盘后复盘输出（回踩池个股 + 板块轮动）。
+-- 只作展示，不参与选股决策；落库是为了能回头翻「上周它怎么说的那只票」。
+-- 唯一键保证幂等：同票同日重复分析是更新而非插入，也是 API 按需分析
+-- 「默认读缓存」的依据——前端无脑调 POST 时不会按次重复计费。
+CREATE TABLE IF NOT EXISTS llm_review (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  trade_date DATE NOT NULL,
+  kind VARCHAR(16) NOT NULL COMMENT 'stock/concept',
+  code VARCHAR(10) NULL,
+  name VARCHAR(32) NULL,
+  content TEXT NOT NULL,
+  model VARCHAR(32) NOT NULL DEFAULT '',
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE KEY uq_llm_date_kind_code (trade_date, kind, code),
+  KEY idx_llm_date (trade_date)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  COMMENT='盘后LLM复盘输出。只作展示,不参与选股决策';

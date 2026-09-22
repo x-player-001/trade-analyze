@@ -21,6 +21,7 @@ from api.routers import (
     pool_limitup,
     pullback,
     quotes,
+    review,
     rotation,
     sentiment,
     validation,
@@ -62,6 +63,7 @@ app.include_router(pullback.router)
 app.include_router(favorite.router)
 app.include_router(pool_limitup.router)
 app.include_router(rotation.router)
+app.include_router(review.router)
 
 
 @app.get("/health", tags=["meta"], summary="健康检查")

@@ -37,6 +37,8 @@ from sqlalchemy import text
 from common.config import settings
 from common.db import session_scope
 from common.logging_conf import get_logger
+from common.models import LlmReview
+from common.upsert import bulk_upsert
 
 log = get_logger("llm_review")
 
@@ -110,16 +112,23 @@ def _fmt_kline(rows: list[dict]) -> str:
 
 
 def fetch_triggered(session, trade_date: date, only_default: bool = True,
-                    limit: int = MAX_STOCKS) -> list[Stock]:
-    """取当日触发的回踩池个股 + 各自的 K 线窗口。"""
+                    limit: int = MAX_STOCKS,
+                    any_status: bool = False) -> list[Stock]:
+    """取某日回踩池个股 + 各自的 K 线窗口。
+
+    `any_status`：默认只取当日新触发(`triggered`)的,这是每日批量的口径；
+    按需分析要能回看任意历史记录(可能已 hit/settled),故放开状态限制。
+    """
     cond = "AND vol20<=2.5 AND broke_date IS NULL" if only_default else ""
+    if not any_status:
+        cond += " AND status = 'triggered'"
     rows = session.execute(text(f"""
         SELECT code, name, gain_from_low, vol20, streak_days, streak_gain,
                breakout_vol_ratio, pullback_vol_ratio, drawdown_from_peak,
                dist_ma5, dist_ma10, dist_ma20, rhythm, pullback_days,
                breakout_date, streak_end_date, breakout_boards, first_board
         FROM watch_pullback
-        WHERE pullback_date = :d AND status = 'triggered' {cond}
+        WHERE pullback_date = :d {cond}
         ORDER BY vol20 LIMIT :n
     """), {"d": trade_date, "n": limit}).mappings().all()
 
@@ -269,32 +278,14 @@ def review_concepts(board: dict) -> Optional[str]:
     return _call_llm(prompt, CONCEPT_SYSTEM)
 
 
-DDL = """
-CREATE TABLE IF NOT EXISTS llm_review (
-  id BIGINT AUTO_INCREMENT PRIMARY KEY,
-  trade_date DATE NOT NULL,
-  kind VARCHAR(16) NOT NULL COMMENT 'stock/concept',
-  code VARCHAR(10) NULL,
-  name VARCHAR(32) NULL,
-  content TEXT NOT NULL,
-  model VARCHAR(32) NOT NULL DEFAULT '',
-  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  UNIQUE KEY uq_llm_date_kind_code (trade_date, kind, code),
-  KEY idx_llm_date (trade_date)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-  COMMENT='盘后LLM复盘输出。只作展示,不参与选股决策'
-"""
-
-
 def save(session, trade_date: date, kind: str, code: Optional[str],
          name: Optional[str], content: str) -> None:
-    session.execute(text("""
-        INSERT INTO llm_review (trade_date, kind, code, name, content, model)
-        VALUES (:d, :k, :c, :n, :t, :m)
-        ON DUPLICATE KEY UPDATE content=VALUES(content), model=VALUES(model),
-                                created_at=CURRENT_TIMESTAMP
-    """), {"d": trade_date, "k": kind, "c": code, "n": name,
-           "t": content, "m": settings.deepseek_model})
+    """幂等写入。走 bulk_upsert 而非裸 SQL——ON DUPLICATE KEY 是 MySQL 方言,
+    单测的 SQLite 跑不了。"""
+    bulk_upsert(session, LlmReview, [dict(
+        trade_date=trade_date, kind=kind, code=code, name=name,
+        content=content, model=settings.deepseek_model,
+    )], update_cols=["content", "model"])
 
 
 def run(trade_date: Optional[date] = None, *, stocks: bool = True,
@@ -302,9 +293,6 @@ def run(trade_date: Optional[date] = None, *, stocks: bool = True,
         limit: int = MAX_STOCKS, dry_run: bool = False) -> None:
     from api.routers.rotation import rotation_board
     from common.db import SessionLocal
-
-    with session_scope() as s:
-        s.execute(text(DDL))
 
     with session_scope() as s:
         if trade_date is None:

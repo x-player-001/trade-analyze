@@ -843,3 +843,47 @@ class RotationBoardOut(BaseModel):
     # delta 为正(大盘整体在涨)，用绝对阈值会把半数概念标成"升温"。
     median_delta: float = 0.0
     note: str = ""
+
+
+# ---------------------------------------------------------------------------
+# LLM 盘后复盘
+# ---------------------------------------------------------------------------
+class ReviewOut(BaseModel):
+    """一条 LLM 复盘。
+
+    **只作展示,不参与选股决策**——内容是对已有数据的翻译,不产生新依据。
+    `content` 里引用的日期与数值均来自库内,可回查核对。
+    """
+    trade_date: date
+    kind: str                                 # stock / concept
+    code: Optional[str] = None
+    name: Optional[str] = None
+    content: str
+    model: str = ""
+    created_at: Optional[datetime] = None
+
+
+class ReviewDayOut(BaseModel):
+    """某交易日的全部复盘：板块一条 + 个股若干。"""
+    trade_date: Optional[date] = None
+    concept: Optional[ReviewOut] = None       # 板块轮动复盘(每日一条)
+    stocks: List[ReviewOut] = []
+    total: int = 0
+    note: str = ""
+
+
+class ReviewAnalyzeOut(BaseModel):
+    """前端按需发起的个股分析结果。
+
+    `cached=true` 表示直接返回库内已有的那条,没有重新调用模型——
+    同一只票同一天重复请求不会重复计费。传 `force=true` 可强制重算。
+    """
+    code: str
+    name: str = ""
+    trade_date: Optional[date] = None
+    content: str = ""
+    model: str = ""
+    cached: bool = False
+    # 分析所依据的池内记录(便于前端对照);无记录时为空
+    pullback_date: Optional[date] = None
+    status: Optional[str] = None

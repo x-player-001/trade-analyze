@@ -1057,3 +1057,36 @@ class WatchFavorite(Base, TimestampMixin):
     # 人工备注：为什么关注它
     note: Mapped[Optional[str]] = mapped_column(String(255), comment="备注")
 
+
+
+class LlmReview(Base):
+    """LLM 盘后复盘输出（回踩池个股 + 板块轮动）。
+
+    **只作展示，不参与选股决策**——内容是对已有数据的翻译，不产生新依据。
+    落库的意义在于可回头翻「上周它怎么说的那只票」；不落库则输出是一次性的。
+
+    唯一键 (trade_date, kind, code) 保证幂等：同票同日重复分析是更新而非插入。
+    这既防重复行，也是 API 按需分析「默认读缓存」的依据——
+    **前端若在渲染里无脑调 POST，没有这层会按次烧钱**。
+
+    `code` 对板块复盘为 NULL（每日一条）。注意 MySQL 唯一索引允许多个 NULL，
+    故板块侧的幂等由 upsert 的冲突键覆盖不到——写入前按 (date, kind) 先删后插，
+    或依赖每日只跑一次。当前是后者。
+    """
+
+    __tablename__ = "llm_review"
+    __table_args__ = (
+        UniqueConstraint("trade_date", "kind", "code", name="uq_llm_date_kind_code"),
+    )
+
+    id: Mapped[int] = mapped_column(BigIntPK, primary_key=True, autoincrement=True)
+    trade_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    kind: Mapped[str] = mapped_column(String(16), nullable=False,
+                                      comment="stock/concept")
+    code: Mapped[Optional[str]] = mapped_column(String(10), index=True)
+    name: Mapped[Optional[str]] = mapped_column(String(32))
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    model: Mapped[str] = mapped_column(String(32), nullable=False, default="")
+    created_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime, server_default=func.now()
+    )

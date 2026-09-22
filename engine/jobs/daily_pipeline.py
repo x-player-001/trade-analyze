@@ -21,6 +21,7 @@ from engine.datasource.pipeline import sync_daily_all
 from engine.datasource.tushare_source import TushareSource
 from engine.selection.selector import run_selection_multi
 from engine.jobs.fetch_hotspot import run as fetch_hotspot
+from engine.jobs.llm_review import run as llm_review
 from engine.jobs.fetch_sentiment import run as fetch_sentiment
 from engine.jobs.watch_lowvol import detect_new_entries as detect_lowvol
 from engine.jobs.watch_lowvol import track_and_settle as settle_lowvol
@@ -113,6 +114,15 @@ def main() -> None:
         fetch_sentiment()
     except Exception:
         log.exception("情绪快照失败")
+
+    # 7. LLM 盘后复盘：当日触发的回踩池个股 + 板块轮动。
+    #    **必须排在 fetch_hotspot(第5步)之后**——板块复盘读 concept_daily，
+    #    热点没落库时它只能拿到昨天的序列，会把昨天的主线说成今天的。
+    #    外部 API 调用，失败不影响任何已落库数据，故放最后。
+    try:
+        llm_review()
+    except Exception:
+        log.exception("LLM 复盘失败")
 
     log.info("===== 每日管线结束 =====")
 
