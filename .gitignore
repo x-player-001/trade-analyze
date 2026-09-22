@@ -23,3 +23,8 @@ memory/
 
 # Claude 本地权限配置
 .claude/settings.local.json
+
+# 服务器比对用的临时副本(见 sgp-deployment-git 记忆),不进仓库
+chk/
+favchk/
+luchk/
