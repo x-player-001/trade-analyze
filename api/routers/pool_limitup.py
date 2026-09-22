@@ -53,6 +53,22 @@ LIVE_SPECS = (
     ("lowvol", WatchLowvol, ("watching",)),
 )
 
+# 【入池日==涨停日要不要算】取决于该池的触发语义，**三池不同**。
+#
+# watch 低位首板的入池条件【就是「当天涨停」】，再标一次「池内涨停」是
+# 同义反复。实测 2026-09-21：19 只标记里 13 只是当天刚入池的，占 68%。
+# 全历史 1465/1466 = 99.9% 的首板入池日就是涨停日——这不是信号，是定义。
+#
+# lowvol 低位放量不要求涨停，但放量当天常伴随涨停（实测 115/2987 = 3.9%）。
+# 那 3.9% 同样是「入池当天的事」，不是「盯着的票后来涨停了」，一并排除。
+#
+# pullback 突破回踩【必须保留】——实测 5/14110，罕见但是真信号：
+# peak_close 是启动段的峰值，回踩日自身可以涨停却仍远低于该峰值。
+# 中百集团 000759 2026-06-12 当日 +10.0% 收 5.83，而峰值 6.27（回撤 -7.0%），
+# 判据全部成立。已核对 daily_quote 与 limitup_stock 一致，不是脏数据。
+# 这 5 条里 4 条后来 hit——排掉就丢了真正的二次启动确认。
+SKIP_SAME_DAY = {"watch", "lowvol"}
+
 # 命中后仍算「延续期」的池——按 hit_date 卡，不是按入池日。
 #
 # 【口径必须分开】活跃态按入池日筛、终态按结束日筛。原实现的 bug 正是
@@ -76,12 +92,16 @@ def _entry_col(model):
 
 
 def _pool_records(
-    session: Session, since: date | None, hit_since: date | None
+    session: Session, since: date | None, hit_since: date | None,
+    trade_date: date | None = None,
 ) -> dict[str, list[dict]]:
     """按代码归集池内记录：仍在跟踪的 + 近期命中延续的。
 
     返回 {code: [{pool,status,entry_date,hit_date,is_live}, ...]}。
     同一只票可能有多条（多池、或同池多次入池事件）。
+
+    `trade_date` 是当日涨停日：SKIP_SAME_DAY 里的池，入池日等于它的记录
+    会被剔除（入池条件本身就是当天涨停，再标一次是同义反复）。
     """
     out: dict[str, list[dict]] = {}
     for key, model, statuses in LIVE_SPECS:
@@ -89,6 +109,8 @@ def _pool_records(
         stmt = select(model.code, model.status, col).where(model.status.in_(statuses))
         if since is not None:
             stmt = stmt.where(col >= since)
+        if trade_date is not None and key in SKIP_SAME_DAY:
+            stmt = stmt.where(col != trade_date)
         for code, st, entry in session.execute(stmt).all():
             out.setdefault(code, []).append(
                 dict(pool=key, status=st, entry_date=entry,
@@ -142,7 +164,7 @@ def pool_limitup(
         since = d.fromordinal(d.toordinal() - since_days)
     hit_since = None if live_only else d.fromordinal(d.toordinal() - RECENT_HIT_DAYS)
 
-    records = _pool_records(session, since, hit_since)
+    records = _pool_records(session, since, hit_since, trade_date=d)
     if pool:
         records = {c: [r for r in rs if r["pool"] == pool] for c, rs in records.items()}
         records = {c: rs for c, rs in records.items() if rs}
@@ -204,7 +226,7 @@ def pool_limitup_stats(
     if since_days:
         since = d.fromordinal(d.toordinal() - since_days)
     hit_since = d.fromordinal(d.toordinal() - RECENT_HIT_DAYS)
-    records = _pool_records(session, since, hit_since)
+    records = _pool_records(session, since, hit_since, trade_date=d)
     all_codes = set(records)
 
     total = session.scalar(

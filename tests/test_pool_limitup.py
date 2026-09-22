@@ -314,3 +314,76 @@ def test_stats_splits_live_and_hits(session, client):
     assert st["in_pools"] == 2
     assert st["live_signals"] == 1
     assert st["recent_hits"] == 1
+
+
+# ---------------------------------------------------------------------------
+# 入池日 == 涨停日：三池语义不同（2026-09-22 回归）
+#
+# watch 低位首板的入池条件【就是当天涨停】，再标一次「池内涨停」是同义反复。
+# 实测 2026-09-21：19 只标记里 13 只是当天刚入池的（68%）；
+# 全历史 1465/1466 = 99.9% 的首板入池日就是涨停日——这不是信号，是定义。
+# ---------------------------------------------------------------------------
+
+
+def test_watch_same_day_entry_not_marked(session, client):
+    """首板池当天入池的不标记——入池条件本身就是当天涨停。"""
+    _watchpool(session, "600030", "今天首板", td=D)      # 入池日 == 涨停日
+    _lu(session, "600030", "今天首板", d=D)
+    session.commit()
+
+    assert client.get("/api/pool-limitup").json() == []
+
+
+def test_watch_prior_day_entry_still_marked(session, client):
+    """往日入池、今天又涨停 → 这才是真信号，必须保留。"""
+    _watchpool(session, "600031", "前几天入池", td=date(2026, 9, 10))
+    _lu(session, "600031", "前几天入池", d=D)
+    session.commit()
+
+    rows = client.get("/api/pool-limitup").json()
+    assert [r["code"] for r in rows] == ["600031"]
+    assert rows[0]["pool_detail"][0]["entry_date"] == "2026-09-10"
+
+
+def test_lowvol_same_day_entry_not_marked(session, client):
+    """放量池同理——放量当天常伴随涨停(实测3.9%)，那是入池当天的事。"""
+    session.add(WatchLowvol(
+        code="600032", name="今天放量", board_group="main",
+        trigger_date=D, trigger_close=10.0,
+        gain_from_low=5.0, vol_ratio=2.5, status="watching",
+    ))
+    _lu(session, "600032", "今天放量", d=D)
+    session.commit()
+
+    assert client.get("/api/pool-limitup").json() == []
+
+
+def test_pullback_same_day_entry_IS_marked(session, client):
+    """回踩池【必须保留】同日——罕见(5/14110)但是真信号。
+
+    peak_close 是启动段峰值，回踩日自身可以涨停却仍远低于该峰值。
+    实测中百集团 000759 2026-06-12 当日 +10.0% 收 5.83，峰值 6.27
+    （回撤 -7.0%），三个判据全部成立；已核对 daily_quote 与 limitup_stock
+    一致，不是脏数据。那 5 条里 4 条后来 hit——排掉就丢了二次启动确认。
+    """
+    _pullback(session, "600033", "回踩日涨停", pb=D)     # 回踩日 == 涨停日
+    _lu(session, "600033", "回踩日涨停", d=D)
+    session.commit()
+
+    rows = client.get("/api/pool-limitup").json()
+    assert [r["code"] for r in rows] == ["600033"]
+    assert rows[0]["pools"] == ["pullback"]
+
+
+def test_stats_also_excludes_same_day(session, client):
+    """/stats 与列表口径必须一致，否则数字对不上。"""
+    _watchpool(session, "600034", "今天首板", td=D)
+    _pullback(session, "600035", "回踩", pb=date(2026, 9, 10))
+    _lu(session, "600034", "今天首板", d=D)
+    _lu(session, "600035", "回踩", d=D)
+    session.commit()
+
+    st = client.get("/api/pool-limitup/stats").json()
+    assert st["in_pools"] == 1                    # 只剩回踩那只
+    assert st["by_pool"]["watch"] == 0
+    assert st["by_pool"]["pullback"] == 1
