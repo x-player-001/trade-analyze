@@ -28,6 +28,12 @@ class Settings(BaseSettings):
     # engine/datasource/hithink_source.py
     ths_key: str = ""
 
+    # DeepSeek：盘后 LLM 分析（回踩池 + 板块轮动）。
+    # OpenAI 兼容协议，key 与 TRADING-MASTER-BACK 共用同一个账号。
+    deepseek_api_key: str = ""
+    deepseek_model: str = "deepseek-chat"
+    deepseek_base_url: str = "https://api.deepseek.com"
+
     # 选股参数版本
     active_param_version: str = "v1"
 
