@@ -11,7 +11,7 @@
 
 **休市日必须跳过**：cron 按 1-5 触发，节假日（如 2026-09-25 中秋）
 快照返回的是上个交易日的竞价，若照常落库会被打上今天的日期——
-一条看着完全正常的假数据。交易日判定走 tushare `trade_cal`。
+一条看着完全正常的假数据。交易日判定：同花顺交易日历为主，tushare `trade_cal` 兜底。
 
 接口单次最多 100 只（超出报 `code=1003 thscodes count must not exceed 100`），
 全市场约 56 批、实测 3.3 分钟。
@@ -62,12 +62,27 @@ def _load_cal_cache() -> dict[str, bool]:
         return {}
 
 
-def is_trading_day(d: date) -> Optional[bool]:
+def is_trading_day(d: date, src: Optional[HithinkSource] = None) -> Optional[bool]:
     """交易日判定。取不到返回 None（由调用方决定怎么办）。
 
-    **tushare trade_cal 限 1 次/小时**（实测 2026-09-23，测试调过一次后
-    正式运行即被拒）。故一次拉 CAL_AHEAD 天存本地，命中缓存不发请求——
-    否则只要别处一小时内调过，当天就会因「无法确认」漏存。
+    **主判据是同花顺交易日历**（不限频，交易日盘中已含当日）。但它只给
+    「过去一年到今天」，**今天不在列表里有两种可能**：真休市，或当天列表
+    还没更新——后者若直接判休市，当天竞价就永久丢了。故「不在」时再问
+    tushare 确认；「在」时直接放行，正常交易日根本不碰 tushare。
+    """
+    try:
+        if d.strftime("%Y%m%d") in (src or HithinkSource()).trading_days():
+            return True
+    except Exception as e:  # noqa: BLE001
+        log.warning("同花顺交易日历获取失败: %s —— 转 tushare", str(e)[:120])
+    return _tushare_is_open(d)
+
+
+def _tushare_is_open(d: date) -> Optional[bool]:
+    """tushare 交易日历（兜底）。
+
+    **trade_cal 限 1 次/小时**（实测 2026-09-23，测试调过一次后正式运行
+    即被拒）。故一次拉 CAL_AHEAD 天存本地，命中缓存不发请求。
     """
     key = d.isoformat()
     cache = _load_cal_cache()

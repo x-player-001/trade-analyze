@@ -172,6 +172,12 @@ class HithinkSource:
         return self._items(self._get(
             "/a-share/auction/snapshot", thscodes=",".join(thscodes)))
 
+    def trading_days(self) -> set[str]:
+        """近一年交易日 {'yyyyMMdd', ...}，范围「今天-1年」到「今天」，**不含未来**。
+        实测交易日当天盘中已含当日；不限频（对比 tushare trade_cal 1次/小时）。"""
+        return {x["date"] for x in self._items(self._get("/a-share/calendar/trading-days"))
+                if x.get("date")}
+
     def auction_benchmark(self) -> list[dict]:
         """短线风向标竞价基准。官方筛选过的标的，含 tags 题材标签。"""
         return self._items(self._get("/a-share/auction/short-term-benchmark"))
