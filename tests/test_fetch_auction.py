@@ -25,7 +25,7 @@ ITEMS = [
     _item("600000", "浦发银行", 10.00, 10.00, 3e7),       # 沪，平
     _item("000001", "平安银行", 11.68, 11.71, 2178436.8),  # 深，跌
     _item("300001", "特锐德", 24.00, 20.00, 5e6),          # 创业板 20% 涨停
-    _item("000002", "ST某某", 5.25, 5.00, 1e6),            # ST 5% 涨停
+    _item("000002", "ST某某", 5.50, 5.00, 1e6),            # 主板 ST 现为 10% 涨停
     _item("920001", "北交样本", 13.00, 10.00, 4e5),        # 北交所 30% 涨停
     _item("600001", "停牌股", 0, 8.00, 0),                 # 无成交
 ]
@@ -40,7 +40,7 @@ def test_limit_price_rounds_half_up():
 
 def test_limit_flags_by_board_and_st():
     assert FA.limit_flags("300001", "特锐德", 20.0, 24.0) == (True, False)
-    assert FA.limit_flags("000002", "ST某某", 5.0, 5.25) == (True, False)
+    assert FA.limit_flags("000002", "ST某某", 5.0, 5.50) == (True, False)
     # 主板 10%:涨 5% 不是涨停
     assert FA.limit_flags("000003", "某主板", 5.0, 5.25) == (False, False)
     assert FA.limit_flags("600000", "浦发", 10.0, 9.0) == (False, True)
@@ -139,3 +139,19 @@ def test_trading_day_falls_back_to_tushare(monkeypatch, cal, ts):
     列表未更新时若直接判休市,当天竞价永久丢失。"""
     monkeypatch.setattr(FA, "_tushare_is_open", lambda d: ts)
     assert FA.is_trading_day(date(2026, 9, 25), cal) is ts
+
+
+def test_st_limit_is_not_five_percent():
+    """线上实证(2026-09-23):*ST天箭竞价 −6.95%、*ST航图(科创板) −5.88%
+    都被旧的「ST 一律 5%」判成跌停。主板 ST 2025-07 起为 10%,科创/创业 ST 为 20%。"""
+    assert FA.limit_flags("002977", "*ST天箭", 10.0, 9.31) == (False, False)
+    assert FA.limit_flags("688066", "*ST航图", 10.0, 9.41) == (False, False)
+    assert FA.limit_flags("002856", "*ST美芝", 10.0, 9.00) == (False, True)
+    assert FA.limit_flags("688121", "*ST卓然", 10.0, 8.00) == (False, True)
+
+
+@pytest.mark.parametrize("name", ["C中塑", "N新股"])
+def test_new_listing_never_flagged(name):
+    """上市前5日无涨跌幅限制:C中塑 竞价 −21.5% 曾被按 20% 误判为跌停。"""
+    assert FA.limit_flags("301686", name, 10.0, 7.85) == (False, False)
+    assert FA.limit_flags("301686", name, 10.0, 12.0) == (False, False)

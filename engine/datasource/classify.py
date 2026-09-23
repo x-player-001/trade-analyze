@@ -27,16 +27,20 @@ def board_group(board: str) -> str:
     return "main" if board == "main" else "other"
 
 
-def price_limit_pct(board: str, is_st: bool) -> float:
-    """涨跌幅限制。
+def price_limit_pct(board: str, is_st: bool) -> float:  # noqa: ARG001
+    """涨跌幅限制（现行规则）。
 
-    ST: 5%
-    创业板/科创板: 20%
+    创业板/科创板: 20%（ST 同样 20%，从来不是 5%）
     北交所: 30%
-    主板: 10%
+    主板: 10%（**ST 也是 10%**）
+
+    【原「ST 一律 5%」已过时】沪深交易所 2025-07 起主板风险警示股
+    涨跌幅由 5% 调为 10%。线上实证（2026-09-23 竞价）：*ST天箭 002977
+    竞价 −6.95%、*ST亚士 603378 −5.84%——竞价价不可能越过涨跌停价，
+    若仍是 5% 这两个价格根本不存在；原逻辑却把它们都判成了跌停。
+    `is_st` 参数保留以兼容调用方，已不影响结果。
+    **回测 2025-07 之前的主板 ST 时注意**：当时确为 5%。
     """
-    if is_st:
-        return 5.0
     if board in ("gem", "star"):
         return 20.0
     if board == "bse":

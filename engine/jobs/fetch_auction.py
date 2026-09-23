@@ -149,9 +149,11 @@ def _limit_price(pre_close: float, pct: float, up: bool) -> float:
 
 
 def limit_flags(code: str, name: str, pre_close, price) -> tuple[bool, bool]:
-    """竞价价是否达涨/跌停价。创业板/科创板新股前5日无涨跌幅限制，
-    这里会按 20% 误判——每天至多一两只，汇总层面可忽略。"""
-    if not pre_close or not price:
+    """竞价价是否达涨/跌停价。
+
+    新股不判：名称 N 开头=上市首日、C 开头=注册制上市前5日，无涨跌幅限制
+    （实测 C中塑 301686 竞价 −21.5% 曾被按 20% 误判为跌停）。"""
+    if not pre_close or not price or (name or "").startswith(("N", "C")):
         return False, False
     pct = price_limit_pct(classify_board(code), is_st_name(name or ""))
     up = price >= _limit_price(pre_close, pct, True) - 1e-6
