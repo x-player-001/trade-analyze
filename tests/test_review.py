@@ -261,6 +261,16 @@ def test_fmt_heat_states_history_limit(rv):
     assert "序列:" in txt
 
 
+def test_stock_prompt_keeps_board_association():
+    """个股 prompt 必须要求解读板块关联。c69ca36 重写时整段删掉了,
+    热度数据照传却没人读——白烧 token,且丢了「蹭脉冲」这个最有用的判断。"""
+    from engine.jobs.llm_review import STOCK_SYSTEM
+    assert "板块关联" in STOCK_SYSTEM
+    for case in ("同步", "背离", "蹭脉冲"):
+        assert case in STOCK_SYSTEM
+    assert "没有实测基准" in STOCK_SYSTEM
+
+
 def test_concept_save_is_idempotent_across_reruns(rv):
     """**回归**:板块复盘重跑不能堆重复行。
 
