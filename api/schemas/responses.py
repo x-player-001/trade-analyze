@@ -887,3 +887,50 @@ class ReviewAnalyzeOut(BaseModel):
     # 分析所依据的池内记录(便于前端对照);无记录时为空
     pullback_date: Optional[date] = None
     status: Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
+# 集合竞价（读库，日频）
+# ---------------------------------------------------------------------------
+class AuctionMarketOut(BaseModel):
+    """全市场开盘竞价汇总，一个交易日一条。金额单位**元**。"""
+    trade_date: date
+    total_amount: float
+    sh_amount: float
+    sz_amount: float
+    bj_amount: float
+    chg_pct: Optional[float] = None           # 总额较上一条记录的变化%，最早一条为 null
+    n_codes: int                              # 请求代码数
+    n_fetched: int                            # 实际返回数
+    complete: bool                            # n_fetched >= 95% n_codes；false 时总额偏低不可信
+    n_traded: int
+    n_up: int
+    n_down: int
+    n_limit_up: int
+    n_limit_down: int
+
+
+class AuctionStockOut(BaseModel):
+    """个股开盘竞价。量单位**手**，额单位**元**，百分比字段已 ×100。"""
+    trade_date: date
+    code: str
+    name: Optional[str] = None
+    auction_price: Optional[float] = None
+    auction_pct: Optional[float] = None
+    auction_volume: Optional[float] = None
+    auction_amount: Optional[float] = None
+    unmatched: Optional[float] = None         # 未匹配量(手)，负=卖压
+    turnover_pct: Optional[float] = None
+    vs_yesterday_pct: Optional[float] = None  # 竞价量占昨日成交量%
+    volume_ratio: Optional[float] = None
+    pre_close: Optional[float] = None
+    is_limit_up: bool = False
+    is_limit_down: bool = False
+
+
+class AuctionStockListOut(BaseModel):
+    """某交易日的个股竞价（分页）。`total` 是筛选后总数，非本页条数。"""
+    trade_date: Optional[date] = None
+    total: int = 0
+    items: List[AuctionStockOut] = []
+    note: Optional[str] = None
