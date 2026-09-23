@@ -94,3 +94,21 @@ def test_fetch_all_isolates_bad_code(monkeypatch):
             return [{"ticker": t[:6]} for t in ths]
     got = FA.fetch_all(Src(), ["000001", "999999", "600000"])
     assert sorted(r["ticker"] for r in got) == ["000001", "600000"]
+
+
+def test_trading_day_uses_cache_without_request(monkeypatch, tmp_path):
+    """trade_cal 限 1 次/小时:命中缓存绝不能再发请求,否则当天会被频控拒掉。"""
+    import json
+    cache = tmp_path / "cal.json"
+    cache.write_text(json.dumps({"2026-09-25": False, "2026-09-24": True}))
+    monkeypatch.setattr(FA, "CAL_CACHE", cache)
+
+    import engine.datasource.tushare_source as TS
+
+    def boom(*a, **k):
+        raise AssertionError("命中缓存不该请求 tushare")
+    monkeypatch.setattr(TS, "TushareSource", boom)
+    assert FA.is_trading_day(date(2026, 9, 25)) is False
+    assert FA.is_trading_day(date(2026, 9, 24)) is True
+    # 缓存外且请求失败 → None(调用方据此拒绝落库)
+    assert FA.is_trading_day(date(2026, 12, 1)) is None

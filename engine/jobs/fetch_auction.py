@@ -23,9 +23,11 @@
 from __future__ import annotations
 
 import argparse
+import json
 import signal
-from datetime import date
+from datetime import date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
+from pathlib import Path
 from typing import Optional
 
 from sqlalchemy import func, select
@@ -42,6 +44,8 @@ log = setup_logging("fetch_auction")
 
 BATCH = 100               # 接口硬上限，超过直接 1003
 TIMEOUT = 15 * 60         # 正常 3~4 分钟；akshare 挂 13 小时的教训，外部源一律设墙钟
+CAL_AHEAD = 90            # 交易日历一次拉 90 天，一季度只需请求一次
+CAL_CACHE = Path(__file__).resolve().parents[2] / "logs" / "trade_cal_cache.json"
 
 
 def _f(v, default=None):
@@ -51,15 +55,39 @@ def _f(v, default=None):
         return default
 
 
+def _load_cal_cache() -> dict[str, bool]:
+    try:
+        return json.loads(CAL_CACHE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
 def is_trading_day(d: date) -> Optional[bool]:
-    """tushare 交易日历。取不到返回 None（由调用方决定怎么办）。"""
+    """交易日判定。取不到返回 None（由调用方决定怎么办）。
+
+    **tushare trade_cal 限 1 次/小时**（实测 2026-09-23，测试调过一次后
+    正式运行即被拒）。故一次拉 CAL_AHEAD 天存本地，命中缓存不发请求——
+    否则只要别处一小时内调过，当天就会因「无法确认」漏存。
+    """
+    key = d.isoformat()
+    cache = _load_cal_cache()
+    if key in cache:
+        return cache[key]
     try:
         from engine.datasource.tushare_source import TushareSource
-        ds = d.strftime("%Y%m%d")
-        df = TushareSource().pro.trade_cal(exchange="SSE", start_date=ds, end_date=ds)
+        df = TushareSource().pro.trade_cal(
+            exchange="SSE", start_date=d.strftime("%Y%m%d"),
+            end_date=(d + timedelta(days=CAL_AHEAD)).strftime("%Y%m%d"))
         if df is None or df.empty:
             return None
-        return bool(int(df.iloc[0]["is_open"]))
+        for cd, is_open in zip(df["cal_date"], df["is_open"]):
+            cache[f"{cd[:4]}-{cd[4:6]}-{cd[6:]}"] = bool(int(is_open))
+        try:
+            CAL_CACHE.parent.mkdir(parents=True, exist_ok=True)
+            CAL_CACHE.write_text(json.dumps(cache, sort_keys=True), encoding="utf-8")
+        except OSError as e:
+            log.warning("交易日历缓存写入失败: %s", e)
+        return cache.get(key)
     except Exception as e:  # noqa: BLE001
         log.warning("交易日历获取失败: %s", str(e)[:120])
         return None
@@ -164,8 +192,11 @@ def summarize(rows: list[dict], d: date, n_codes: int) -> dict:
 def save(session, rows: list[dict], summary: dict) -> None:
     bulk_upsert(session, AuctionStock, rows,
                 update_cols=[k for k in rows[0] if k not in ("trade_date", "code")])
-    bulk_upsert(session, AuctionMarket, [summary],
-                update_cols=[k for k in summary if k != "trade_date"] + ["created_at"])
+    # created_at 显式给值再更新：upsert 只能引用行内提供的列，否则 MySQL 报
+    # Unknown column；重跑后它应反映这份汇总是何时生成的。
+    row = {**summary, "created_at": datetime.now()}
+    bulk_upsert(session, AuctionMarket, [row],
+                update_cols=[k for k in row if k != "trade_date"])
 
 
 def run(d: Optional[date] = None, force: bool = False) -> Optional[dict]:
