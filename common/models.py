@@ -1090,3 +1090,69 @@ class LlmReview(Base):
     created_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime, server_default=func.now()
     )
+
+
+# ---------------------------------------------------------------------------
+# 集合竞价
+# ---------------------------------------------------------------------------
+class AuctionStock(Base):
+    """个股开盘集合竞价（9:25 撮合结果）。每日 9:30 抓一次。
+
+    **只能每天自己存**：同花顺只给当日快照、无历史接口；tushare
+    `stk_auction` 当前账号无权限。不存就永远补不回来。
+
+    单位：`auction_volume` 是**手**，`auction_amount` 是**元**
+    （实测 平安银行 1865.1手 × 100 × 11.68 = 217.8万，与返回值一致）。
+    """
+
+    __tablename__ = "auction_stock"
+    __table_args__ = (
+        UniqueConstraint("trade_date", "code", name="uq_auction_date_code"),
+    )
+
+    id: Mapped[int] = mapped_column(BigIntPK, primary_key=True, autoincrement=True)
+    trade_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    code: Mapped[str] = mapped_column(String(10), nullable=False, index=True)
+    name: Mapped[Optional[str]] = mapped_column(String(32))
+    auction_price: Mapped[Optional[float]] = mapped_column(Price)
+    auction_pct: Mapped[Optional[float]] = mapped_column(Float, comment="竞价涨跌幅%")
+    auction_volume: Mapped[Optional[float]] = mapped_column(Float, comment="竞价量(手)")
+    auction_amount: Mapped[Optional[float]] = mapped_column(Money, comment="竞价额(元)")
+    unmatched: Mapped[Optional[float]] = mapped_column(
+        Float, comment="未匹配量(手),负=卖压")
+    turnover_pct: Mapped[Optional[float]] = mapped_column(Float, comment="竞价换手%")
+    vs_yesterday_pct: Mapped[Optional[float]] = mapped_column(
+        Float, comment="竞价量占昨日成交量%")
+    volume_ratio: Mapped[Optional[float]] = mapped_column(Float, comment="竞价量比")
+    pre_close: Mapped[Optional[float]] = mapped_column(Price)
+    is_limit_up: Mapped[bool] = mapped_column(Boolean, default=False,
+                                              comment="竞价价达涨停价")
+    is_limit_down: Mapped[bool] = mapped_column(Boolean, default=False,
+                                                comment="竞价价达跌停价")
+
+
+class AuctionMarket(Base):
+    """全市场集合竞价汇总，每日一行。由 auction_stock 聚合而来。
+
+    `n_codes` 是请求的代码数、`n_fetched` 是实际返回数——两者差得多
+    说明当天批次失败较多，总额偏低不可信，看数前先对一下这两个。
+    """
+
+    __tablename__ = "auction_market"
+
+    trade_date: Mapped[date] = mapped_column(Date, primary_key=True)
+    total_amount: Mapped[float] = mapped_column(Money, nullable=False,
+                                                comment="全市场竞价额(元)")
+    sh_amount: Mapped[float] = mapped_column(Money, nullable=False, default=0)
+    sz_amount: Mapped[float] = mapped_column(Money, nullable=False, default=0)
+    bj_amount: Mapped[float] = mapped_column(Money, nullable=False, default=0)
+    n_codes: Mapped[int] = mapped_column(Integer, nullable=False, comment="请求代码数")
+    n_fetched: Mapped[int] = mapped_column(Integer, nullable=False, comment="实际返回数")
+    n_traded: Mapped[int] = mapped_column(Integer, nullable=False, comment="竞价有成交数")
+    n_up: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    n_down: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    n_limit_up: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    n_limit_down: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime, server_default=func.now()
+    )

@@ -669,3 +669,45 @@ CREATE TABLE IF NOT EXISTS llm_review (
   KEY idx_llm_date (trade_date)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
   COMMENT='盘后LLM复盘输出。只作展示,不参与选股决策';
+
+-- 个股开盘集合竞价(9:25撮合结果),每日9:30抓一次。
+-- 同花顺只给当日快照、无历史接口,不存就永远补不回来。
+CREATE TABLE IF NOT EXISTS auction_stock (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  trade_date DATE NOT NULL,
+  code VARCHAR(10) NOT NULL,
+  name VARCHAR(32) NULL,
+  auction_price DECIMAL(12,3) NULL,
+  auction_pct FLOAT NULL COMMENT '竞价涨跌幅%',
+  auction_volume FLOAT NULL COMMENT '竞价量(手)',
+  auction_amount DECIMAL(20,2) NULL COMMENT '竞价额(元)',
+  unmatched FLOAT NULL COMMENT '未匹配量(手),负=卖压',
+  turnover_pct FLOAT NULL COMMENT '竞价换手%',
+  vs_yesterday_pct FLOAT NULL COMMENT '竞价量占昨日成交量%',
+  volume_ratio FLOAT NULL COMMENT '竞价量比',
+  pre_close DECIMAL(12,3) NULL,
+  is_limit_up TINYINT(1) NOT NULL DEFAULT 0 COMMENT '竞价价达涨停价',
+  is_limit_down TINYINT(1) NOT NULL DEFAULT 0 COMMENT '竞价价达跌停价',
+  UNIQUE KEY uq_auction_date_code (trade_date, code),
+  KEY idx_auction_date (trade_date),
+  KEY idx_auction_code (code)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+  COMMENT='个股开盘集合竞价';
+
+-- 全市场集合竞价汇总,每日一行,由 auction_stock 聚合。
+CREATE TABLE IF NOT EXISTS auction_market (
+  trade_date DATE NOT NULL PRIMARY KEY,
+  total_amount DECIMAL(20,2) NOT NULL COMMENT '全市场竞价额(元)',
+  sh_amount DECIMAL(20,2) NOT NULL DEFAULT 0,
+  sz_amount DECIMAL(20,2) NOT NULL DEFAULT 0,
+  bj_amount DECIMAL(20,2) NOT NULL DEFAULT 0,
+  n_codes INT NOT NULL COMMENT '请求代码数',
+  n_fetched INT NOT NULL COMMENT '实际返回数',
+  n_traded INT NOT NULL COMMENT '竞价有成交数',
+  n_up INT NOT NULL DEFAULT 0,
+  n_down INT NOT NULL DEFAULT 0,
+  n_limit_up INT NOT NULL DEFAULT 0,
+  n_limit_down INT NOT NULL DEFAULT 0,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+  COMMENT='全市场集合竞价汇总';
