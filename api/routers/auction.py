@@ -4,6 +4,7 @@
     GET /api/auction/market          全市场汇总序列（每日一条）
     GET /api/auction/stocks          某日个股明细（筛选/排序/分页）
     GET /api/auction/stocks/{code}   单只票的竞价历史
+    GET /api/auction/concepts        按概念聚合（相对强度 / 竞价额排名）
 
 **与 `/api/hotspot/auction` 的区别**：那个是实时直调同花顺、按代码查、不落库；
 本接口读库，有历史（自 2026-09-23 起积累），且有全市场汇总。
@@ -11,13 +12,21 @@
 from __future__ import annotations
 
 from datetime import date
+from statistics import median
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
-from api.schemas.responses import AuctionMarketOut, AuctionStockListOut, AuctionStockOut
+from api.routers.concept import _is_broad
+from api.schemas.responses import (
+    AuctionConceptListOut,
+    AuctionConceptOut,
+    AuctionMarketOut,
+    AuctionStockListOut,
+    AuctionStockOut,
+)
 from common.db import get_session
 from common.models import AuctionMarket, AuctionStock
 
@@ -141,6 +150,121 @@ def auction_stocks(
     return AuctionStockListOut(
         trade_date=trade_date, total=total, items=items,
         note=None if total else f"{trade_date} 无匹配数据",
+    )
+
+
+# ---------------------------------------------------------------------------
+# 按概念聚合
+# ---------------------------------------------------------------------------
+HOT_STRENGTH = 2.0        # 个股强度超过市场 2 倍且红盘 = 抢筹
+TOP_N = 3
+_concept_cache: dict[tuple, tuple] = {}
+
+
+def aggregate_concepts(session: Session, trade_date: date) -> tuple:
+    """按概念聚合某日竞价。返回 (prev_date, market_ratio, [概念统计…])，不做过滤排序。
+
+    **强度用相对值，不用绝对竞价额排**（2026-09-24 实测）：绝对额前十是
+    芯片(923只)/华为(1003只)/机器人(1224只)——就是成分股数量排名，红盘率
+    只有16~22%；且概念高度重叠，同一只 300285 是其中 6 个概念的最大贡献者。
+    强度 = (概念竞价额 / 概念昨日全天成交额) ÷ 全市场同比值，1.0 = 与市场持平。
+
+    成分股只取「当日有竞价记录且昨日有成交额」的，否则分子分母口径不一。
+    结果按 (trade_date, 汇总生成时间) 缓存——竞价一天只落一次，重跑会刷新时间戳。
+    """
+    stamp = session.execute(text(
+        "SELECT created_at FROM auction_market WHERE trade_date = :d"
+    ), {"d": trade_date}).scalar()
+    key = (trade_date, stamp)
+    if key in _concept_cache:
+        return _concept_cache[key]
+
+    auc = {c: (float(a or 0), p, n) for c, a, p, n in session.execute(text(
+        "SELECT code, auction_amount, auction_pct, name FROM auction_stock "
+        "WHERE trade_date = :d"), {"d": trade_date})}
+    prev = session.execute(text(
+        "SELECT MAX(trade_date) FROM daily_quote WHERE trade_date < :d"
+    ), {"d": trade_date}).scalar()
+    amt = {c: float(a) for c, a in session.execute(text(
+        "SELECT code, amount FROM daily_quote WHERE trade_date = :p AND amount > 0"
+    ), {"p": prev})} if prev else {}
+    members: dict[str, set] = {}
+    ths: dict[str, str] = {}
+    for c, t, n in session.execute(text(
+            "SELECT code, thscode, concept_name FROM stock_concept")):
+        if c in auc and c in amt:
+            members.setdefault(n, set()).add(c)
+            ths.setdefault(n, t)
+
+    valid = [c for c in auc if c in amt]
+    mkt = (sum(auc[c][0] for c in valid) / sum(amt[c] for c in valid)) if valid else 0.0
+
+    out = []
+    for name, cs in members.items():
+        a = sum(auc[c][0] for c in cs)
+        if not a or not mkt:
+            continue
+        st = {c: auc[c][0] / amt[c] / mkt for c in cs}
+        traded = [c for c in cs if auc[c][0] > 0 and auc[c][1] is not None]
+        tops = sorted(cs, key=lambda c: -auc[c][0])[:TOP_N]
+        out.append(dict(
+            concept=name, thscode=ths.get(name), n_stocks=len(cs), auction_amount=a,
+            strength=round(a / sum(amt[c] for c in cs) / mkt, 3),
+            median_strength=round(median(st.values()), 3),
+            n_hot=sum(1 for c in cs if st[c] > HOT_STRENGTH and (auc[c][1] or 0) > 0),
+            up_ratio=round(sum(1 for c in traded if auc[c][1] > 0) / len(traded) * 100, 1)
+            if traded else 0.0,
+            avg_pct=round(sum(auc[c][1] for c in traded) / len(traded), 3) if traded else 0.0,
+            top_share=round(auc[tops[0]][0] / a * 100, 1),
+            top=[dict(code=c, name=auc[c][2], auction_amount=auc[c][0],
+                      share=round(auc[c][0] / a * 100, 1), auction_pct=auc[c][1],
+                      strength=round(st[c], 3)) for c in tops],
+        ))
+    res = (prev, mkt, out)
+    if len(_concept_cache) > 20:
+        _concept_cache.clear()
+    _concept_cache[key] = res
+    return res
+
+
+@router.get("/concepts", response_model=AuctionConceptListOut,
+            summary="按概念聚合的竞价资金")
+def auction_concepts(
+    trade_date: Optional[date] = Query(None, description="默认最新有数据的交易日"),
+    order_by: str = Query(
+        "strength",
+        description="strength(相对强度,默认)/amount(竞价额)/n_hot(抢筹只数)/"
+                    "median_strength(成分股强度中位数)",
+    ),
+    limit: int = Query(10, ge=1, le=400),
+    min_stocks: int = Query(10, ge=1, description="成分股下限，太小的概念波动大"),
+    max_top_share: float = Query(
+        40, gt=0, le=100,
+        description="最大单票占比上限%——超过说明是一只票在撑，不是板块。"
+                    "实测高压氧舱 75% 竞价额来自三星电气一只。传 100 关闭",
+    ),
+    include_broad: bool = Query(False, description="是否包含融资融券/沪股通等宽基标签"),
+    session: Session = Depends(get_session),
+) -> AuctionConceptListOut:
+    if order_by not in ("strength", "amount", "n_hot", "median_strength"):
+        raise HTTPException(400, "order_by 仅支持 strength/amount/n_hot/median_strength")
+    if trade_date is None:
+        trade_date = session.scalar(select(func.max(AuctionMarket.trade_date)))
+    if trade_date is None:
+        return AuctionConceptListOut(note="暂无竞价数据，每个交易日 9:30 后可用")
+
+    prev, mkt, rows = aggregate_concepts(session, trade_date)
+    if not rows:
+        return AuctionConceptListOut(trade_date=trade_date, prev_date=prev,
+                                     note=f"{trade_date} 无竞价或概念映射数据")
+    rows = [r for r in rows
+            if r["n_stocks"] >= min_stocks and r["top_share"] <= max_top_share
+            and (include_broad or not _is_broad(r["concept"]))]
+    key = "auction_amount" if order_by == "amount" else order_by
+    rows.sort(key=lambda r: (-r[key], -r["auction_amount"]))
+    return AuctionConceptListOut(
+        trade_date=trade_date, prev_date=prev, market_strength=round(mkt * 100, 3),
+        total=len(rows), items=[AuctionConceptOut(**r) for r in rows[:limit]],
     )
 
 

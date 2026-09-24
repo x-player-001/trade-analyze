@@ -103,3 +103,75 @@ def test_empty_db(client):
     assert client.get("/api/auction/market").json() == []
     r = client.get("/api/auction/stocks").json()
     assert r["total"] == 0 and r["note"]
+
+
+# ---------------------------------------------------------------------------
+# 按概念聚合
+# ---------------------------------------------------------------------------
+@pytest.fixture()
+def concepts(session):
+    """大盘股概念(额大但强度弱) / 强势概念(额小但强) / 单票撑 / 小概念 / 宽基 + 无概念陪跑。"""
+    from api.routers import auction as A
+    from common.models import DailyQuote, StockConcept
+    A._concept_cache.clear()
+    prev, d = D1, D2
+    groups = {
+        # 名称: [(code, 昨日成交额, 竞价额, 竞价涨幅), ...]
+        "大盘": [(f"0000{i:02d}", 10e8, 2e6, -0.5) for i in range(1, 31)],
+        "强势": [(f"6000{i:02d}", 1e8, 3e6, 2.0) for i in range(1, 11)],
+        "单票撑": [("300001", 1e8, 20e6, 5.0)]
+                  + [(f"3000{i:02d}", 1e8, 0.5e6, -1.0) for i in range(2, 11)],
+        "小概念": [(f"0001{i:02d}", 1e8, 5e6, 1.0) for i in range(1, 4)],
+        "陪跑": [(f"0020{i:02d}", 1e8, 0.1e6, -0.2) for i in range(1, 61)],
+    }
+    for g, lst in groups.items():
+        for code, amt, auc, pct in lst:
+            session.add(DailyQuote(code=code, trade_date=prev, amount=amt, volume=1))
+            session.add(_stk(d, code, auc, pct))
+            if g != "陪跑":
+                session.add(StockConcept(code=code, thscode=f"T{g}", concept_name=g))
+            if g in ("大盘", "强势"):
+                session.add(StockConcept(code=code, thscode="T融资", concept_name="融资融券"))
+    session.add(_mkt(d, 135.5e6))
+    session.commit()
+
+
+def test_concepts_default_strength_filters_noise(client, concepts):
+    r = client.get("/api/auction/concepts").json()
+    assert r["trade_date"] == "2026-09-23" and r["prev_date"] == "2026-09-22"
+    names = [x["concept"] for x in r["items"]]
+    # 单票撑(top_share>40%)、小概念(<10只)、宽基 都被滤掉
+    assert names == ["强势", "大盘"]
+    strong, big = r["items"]
+    assert strong["n_hot"] == 10 and strong["up_ratio"] == 100
+    assert big["strength"] < 1 and big["median_strength"] < 1
+    assert strong["thscode"] == "T强势"
+    assert len(strong["top"]) == 3 and strong["top"][0]["share"] == pytest.approx(10.0)
+
+
+def test_concepts_amount_order_differs_from_strength(client, concepts):
+    """实测:按绝对额排,前面全是成分股多的大概念——这正是默认不用它的原因。"""
+    r = client.get("/api/auction/concepts", params={"order_by": "amount"}).json()
+    assert [x["concept"] for x in r["items"]] == ["大盘", "强势"]
+
+
+def test_concepts_filters_can_be_relaxed(client, concepts):
+    r = client.get("/api/auction/concepts", params={
+        "max_top_share": 100, "min_stocks": 1, "include_broad": True, "limit": 50}).json()
+    names = {x["concept"] for x in r["items"]}
+    assert names == {"强势", "大盘", "单票撑", "小概念", "融资融券"}
+    one = next(x for x in r["items"] if x["concept"] == "单票撑")
+    assert one["top_share"] > 40 and one["top"][0]["code"] == "300001"
+
+
+def test_concepts_market_strength(client, concepts):
+    r = client.get("/api/auction/concepts").json()
+    # 全市场 135.5e6 / 383e8
+    assert r["market_strength"] == pytest.approx(135.5e6 / 383e8 * 100, rel=1e-3)
+
+
+def test_concepts_bad_order_and_empty(client, session):
+    from api.routers import auction as A
+    A._concept_cache.clear()
+    assert client.get("/api/auction/concepts", params={"order_by": "x"}).status_code == 400
+    assert client.get("/api/auction/concepts").json()["note"]
