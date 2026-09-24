@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import json
 import signal
+import time
 from datetime import date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
@@ -43,7 +44,10 @@ from engine.jobs.watch_pullback_live import to_thscode
 log = setup_logging("fetch_auction")
 
 BATCH = 100               # 接口硬上限，超过直接 1003
-TIMEOUT = 15 * 60         # 正常 3~4 分钟；akshare 挂 13 小时的教训，外部源一律设墙钟
+SOFT_DEADLINE = 15 * 60   # 抓取软截止：到点停止抓取，保存已取到的
+TIMEOUT = 20 * 60         # 进程硬墙钟（akshare 挂 13 小时的教训），须晚于软截止留出落库时间
+RETRY_PASSES = 2          # 网络失败的批次整批重试轮数
+RETRY_PAUSE = 10          # 每轮重试前等待秒数
 CAL_AHEAD = 90            # 交易日历一次拉 90 天，一季度只需请求一次
 CAL_CACHE = Path(__file__).resolve().parents[2] / "logs" / "trade_cal_cache.json"
 
@@ -119,25 +123,62 @@ def load_codes(session) -> list[str]:
     ).all())
 
 
-def fetch_all(src: HithinkSource, codes: list[str]) -> list[dict]:
-    """分批取竞价快照。**批次失败转逐只重试**——接口对一条未知代码会让
-    整批报错（920 北交所曾让 400 只全军覆没），不能因此丢掉 99 只好票。"""
+def _is_bad_code(e: Exception) -> bool:
+    """接口对未知代码报 `code=1002 Unknown A-share thscode`——只有这种才值得拆开逐只查。"""
+    s = str(e)
+    return "code=1002" in s or "Unknown" in s
+
+
+def fetch_all(src: HithinkSource, codes: list[str],
+              deadline: Optional[float] = None) -> list[dict]:
+    """分批取竞价快照，返回取到的部分（可能不全，由调用方按 n_fetched 判断）。
+
+    **失败要分两类处理**（2026-09-24 实测教训）：
+    - 坏代码（1002）：整批报错，拆开逐只查，只丢那一只（920 北交所曾让整批覆没）
+    - 网络错误（连接被断、超时）：**不能逐只查**——那是 100 次请求 × 每次最坏
+      ~96 秒重试，一批就能拖两个多小时。9:30 开盘上游负载高，当天第 6 批
+      「Remote end closed connection」后逐只重试，整个任务注定撞墙钟全丢。
+      改为整批放回队列，歇一下再整批重试，最多 RETRY_PASSES 轮。
+
+    `deadline`（time.monotonic）到点即停，**返回已取到的**——宁可存不全
+    （complete=false 可见），也不因超时把已抓的全丢掉。
+    """
     out: list[dict] = []
-    for i in range(0, len(codes), BATCH):
-        chunk = codes[i : i + BATCH]
-        try:
-            out += src.auction_snapshot([to_thscode(c) for c in chunk])
-        except Exception as e:  # noqa: BLE001
-            log.warning("批次失败 (%d~%d): %s —— 转逐只重试",
-                        i, i + len(chunk), str(e)[:120])
-            bad = []
-            for c in chunk:
-                try:
-                    out += src.auction_snapshot([to_thscode(c)])
-                except Exception:  # noqa: BLE001
-                    bad.append(c)
-            if bad:
-                log.warning("%d 只取数失败: %s", len(bad), ",".join(bad[:20]))
+    pending = [codes[i : i + BATCH] for i in range(0, len(codes), BATCH)]
+    for p in range(RETRY_PASSES + 1):
+        if p:
+            log.info("第 %d 轮重试 %d 批，先歇 %ds", p, len(pending), RETRY_PAUSE)
+            time.sleep(RETRY_PAUSE)
+        failed = []
+        for chunk in pending:
+            if deadline is not None and time.monotonic() > deadline:
+                left = sum(len(c) for c in pending[pending.index(chunk):]) \
+                    + sum(len(c) for c in failed)
+                log.warning("到达软截止，放弃剩余 %d 只，保存已取到的", left)
+                return out
+            try:
+                out += src.auction_snapshot([to_thscode(c) for c in chunk])
+            except Exception as e:  # noqa: BLE001
+                if not _is_bad_code(e):
+                    failed.append(chunk)
+                    log.warning("批次网络失败(%s…)，稍后整批重试: %s",
+                                chunk[0], str(e)[:100])
+                    continue
+                log.warning("批次含坏代码(%s…)，转逐只: %s", chunk[0], str(e)[:100])
+                bad = []
+                for c in chunk:
+                    try:
+                        out += src.auction_snapshot([to_thscode(c)])
+                    except Exception:  # noqa: BLE001
+                        bad.append(c)
+                if bad:
+                    log.warning("%d 只取数失败: %s", len(bad), ",".join(bad[:20]))
+        pending = failed
+        if not pending:
+            break
+    if pending:
+        log.warning("%d 批重试 %d 轮仍失败，放弃 %d 只", len(pending), RETRY_PASSES,
+                    sum(len(c) for c in pending))
     return out
 
 
@@ -234,7 +275,7 @@ def run(d: Optional[date] = None, force: bool = False) -> Optional[dict]:
         log.error("库内无代码，放弃")
         return None
 
-    items = fetch_all(HithinkSource(), codes)
+    items = fetch_all(HithinkSource(), codes, time.monotonic() + SOFT_DEADLINE)
     rows = to_rows(items, d)
     if not rows:
         log.error("竞价快照全部失败，未落库")

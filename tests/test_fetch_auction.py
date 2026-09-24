@@ -155,3 +155,46 @@ def test_new_listing_never_flagged(name):
     """上市前5日无涨跌幅限制:C中塑 竞价 −21.5% 曾被按 20% 误判为跌停。"""
     assert FA.limit_flags("301686", name, 10.0, 7.85) == (False, False)
     assert FA.limit_flags("301686", name, 10.0, 12.0) == (False, False)
+
+
+def test_network_error_retries_whole_batch_not_per_code(monkeypatch):
+    """2026-09-24 实测:连接被断后逐只重试,一批就能拖两小时、撞墙钟全丢。
+    网络错误必须整批重试,不许拆成逐只。"""
+    monkeypatch.setattr(FA, "RETRY_PAUSE", 0)
+    calls = []
+
+    class Src:
+        def auction_snapshot(self, ths):
+            calls.append(len(ths))
+            if len(calls) == 1:
+                raise RuntimeError("Remote end closed connection without response")
+            return [{"ticker": t[:6]} for t in ths]
+    got = FA.fetch_all(Src(), [f"{i:06d}" for i in range(1, 151)])
+    assert len(got) == 150
+    assert 1 not in calls                     # 没有逐只请求
+    assert calls == [100, 50, 100]            # 失败批放到下一轮整批重试
+
+
+def test_network_error_gives_up_after_passes(monkeypatch):
+    monkeypatch.setattr(FA, "RETRY_PAUSE", 0)
+
+    class Src:
+        def auction_snapshot(self, ths):
+            if ths[0].startswith("000001"):
+                raise RuntimeError("timed out")
+            return [{"ticker": t[:6]} for t in ths]
+    codes = ["000001"] + [f"6{i:05d}" for i in range(1, 150)]
+    got = FA.fetch_all(Src(), codes)
+    assert len(got) == 50                     # 第二批照常拿到,失败批放弃
+
+
+def test_deadline_returns_partial(monkeypatch):
+    """到软截止返回已取到的,不能因超时把已抓的全丢。"""
+    t = iter([0, 0, 100, 100, 100])
+    monkeypatch.setattr(FA.time, "monotonic", lambda: next(t))
+
+    class Src:
+        def auction_snapshot(self, ths):
+            return [{"ticker": x[:6]} for x in ths]
+    got = FA.fetch_all(Src(), [f"{i:06d}" for i in range(1, 301)], deadline=50)
+    assert len(got) == 200
