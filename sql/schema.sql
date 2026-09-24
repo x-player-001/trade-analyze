@@ -711,3 +711,33 @@ CREATE TABLE IF NOT EXISTS auction_market (
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
   COMMENT='全市场集合竞价汇总';
+
+-- 按概念聚合的开盘竞价,每日约380行(全部概念,不过滤)。可按 thscode 与 concept_daily join,
+-- 检验竞价强弱与当日板块强弱的关联。strength 不分买卖方向;up_strength 只计竞价红盘成分(抢筹)。
+CREATE TABLE IF NOT EXISTS auction_concept_daily (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  trade_date DATE NOT NULL,
+  thscode VARCHAR(16) NOT NULL,
+  concept VARCHAR(48) NOT NULL,
+  is_broad TINYINT(1) NOT NULL DEFAULT 0 COMMENT '宽基/交易属性标签',
+  prev_date DATE NULL COMMENT '强度分母所用的昨日',
+  n_stocks INT NOT NULL,
+  auction_amount DECIMAL(20,2) NOT NULL COMMENT '竞价额(元)',
+  up_amount DECIMAL(20,2) NOT NULL COMMENT '红盘成分竞价额(元)',
+  prev_amount DECIMAL(20,2) NOT NULL COMMENT '成分昨日成交额(元)',
+  strength FLOAT NOT NULL COMMENT '相对强度,不分方向',
+  up_strength FLOAT NOT NULL COMMENT '抢筹强度',
+  median_strength FLOAT NOT NULL,
+  n_hot INT NOT NULL COMMENT '个股强度>2且红盘',
+  up_ratio FLOAT NOT NULL COMMENT '竞价红盘比例%',
+  avg_pct FLOAT NOT NULL COMMENT '竞价平均涨幅%',
+  top_share FLOAT NOT NULL COMMENT '最大单票占比%',
+  mkt_ratio FLOAT NOT NULL COMMENT '全市场竞价额/昨日成交额',
+  mkt_up_ratio FLOAT NOT NULL COMMENT '全市场红盘竞价额/昨日成交额',
+  top_json TEXT NOT NULL COMMENT '贡献前3成分股',
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE KEY uq_acd_date_ths (trade_date, thscode),
+  KEY idx_acd_date (trade_date),
+  KEY idx_acd_ths (thscode)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+  COMMENT='按概念聚合的开盘竞价';

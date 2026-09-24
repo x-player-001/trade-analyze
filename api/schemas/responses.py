@@ -944,7 +944,9 @@ class AuctionConceptOut(BaseModel):
     thscode: Optional[str] = None             # 可接 /api/concept/{thscode} 查成分
     n_stocks: int                             # 参与统计的成分股数
     auction_amount: float                     # 元；概念间重叠，各概念相加 ≠ 全市场
-    strength: float                           # 相对强度：(竞价额/昨日成交额)/全市场同比值
+    up_amount: float                          # 竞价红盘成分的竞价额（元）
+    strength: float                           # 相对强度：(竞价额/昨日成交额)/全市场同比值；不分买卖方向
+    up_strength: float                        # 抢筹强度：只计竞价红盘成分，1.0=与市场持平
     median_strength: float                    # 成分股相对强度中位数；<1 说明多数成员弱于市场
     n_hot: int                                # 抢筹只数：个股强度>2 且竞价红盘
     up_ratio: float                           # 竞价红盘比例 %
@@ -957,6 +959,7 @@ class AuctionConceptListOut(BaseModel):
     trade_date: Optional[date] = None
     prev_date: Optional[date] = None          # 强度的分母用这一天的全天成交额
     market_strength: Optional[float] = None   # 全市场竞价额/昨日成交额 %
+    market_up_strength: Optional[float] = None  # 全市场红盘竞价额/昨日成交额 %
     total: int = 0                            # 过滤后概念总数
     items: List[AuctionConceptOut] = []
     note: Optional[str] = None

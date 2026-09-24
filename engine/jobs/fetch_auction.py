@@ -19,6 +19,7 @@
 用法：
     python -m engine.jobs.fetch_auction           # 当日（非交易日自动跳过）
     python -m engine.jobs.fetch_auction --force   # 跳过交易日判定（手工补跑用）
+    python -m engine.jobs.fetch_auction --concepts-only --date 2026-09-24  # 只重算概念聚合
 """
 from __future__ import annotations
 
@@ -29,13 +30,14 @@ import time
 from datetime import date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
+from statistics import median
 from typing import Optional
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 
 from common.db import session_scope
 from common.logging_conf import setup_logging
-from common.models import AuctionMarket, AuctionStock, DailyQuote
+from common.models import AuctionConceptDaily, AuctionMarket, AuctionStock, DailyQuote
 from common.upsert import bulk_upsert
 from engine.datasource.classify import classify_board, is_st_name, price_limit_pct
 from engine.datasource.hithink_source import HithinkSource
@@ -257,6 +259,111 @@ def save(session, rows: list[dict], summary: dict) -> None:
                 update_cols=[k for k in row if k != "trade_date"])
 
 
+HOT_STRENGTH = 2.0        # 个股强度超过市场 2 倍且竞价红盘 = 抢筹
+TOP_N = 3
+
+
+def aggregate_concepts(session, d: date) -> list[dict]:
+    """从已落库的 auction_stock 按概念聚合，返回待落库行（全部概念，不过滤）。
+
+    **为什么不按绝对竞价额**（2026-09-24 实测）：绝对额前十是芯片(923只)/
+    华为(1003只)/机器人(1224只)——就是成分股数量排名，红盘率只有 16~22%；
+    概念高度重叠，300285 是其中 6 个概念的最大贡献者。故用相对强度。
+
+    **为什么要两种强度**：`strength` 不分买卖方向——09-24 物业管理强度 1.97，
+    但红盘率 21.5%，世联行强度 6.3 却竞价 −2.5%，是**出逃**不是抢筹。
+    `up_strength` 分子只计竞价红盘成分，分母仍用全部成分昨日成交额
+    （分母也只取红盘的话，一只红盘小票就能把比值撑爆）。
+
+    成分只取「当日有竞价记录且昨日有成交额」的，否则分子分母口径不一。
+    """
+    auc = {c: (float(a or 0), p, n) for c, a, p, n in session.execute(text(
+        "SELECT code, auction_amount, auction_pct, name FROM auction_stock "
+        "WHERE trade_date = :d"), {"d": d})}
+    if not auc:
+        return []
+    # 走 ORM 而非裸 text()：后者在 SQLite 取回的日期是字符串，落库时炸
+    prev = session.scalar(
+        select(func.max(DailyQuote.trade_date)).where(DailyQuote.trade_date < d))
+    if prev is None:
+        return []
+    amt = {c: float(a) for c, a in session.execute(text(
+        "SELECT code, amount FROM daily_quote WHERE trade_date = :p AND amount > 0"),
+        {"p": prev})}
+
+    valid = [c for c in auc if c in amt]
+    base = sum(amt[c] for c in valid)
+    if not base:
+        return []
+    mkt = sum(auc[c][0] for c in valid) / base
+    mkt_up = sum(auc[c][0] for c in valid if (auc[c][1] or 0) > 0) / base
+    if not mkt or not mkt_up:
+        return []
+
+    members: dict[str, set] = {}
+    names: dict[str, str] = {}
+    for c, t, n in session.execute(text(
+            "SELECT code, thscode, concept_name FROM stock_concept")):
+        if c in auc and c in amt:
+            members.setdefault(t, set()).add(c)
+            names.setdefault(t, n)
+
+    from api.routers.concept import _is_broad
+
+    rows = []
+    for ths, cs in members.items():
+        a = sum(auc[c][0] for c in cs)
+        if not a:
+            continue
+        p_amt = sum(amt[c] for c in cs)
+        up_a = sum(auc[c][0] for c in cs if (auc[c][1] or 0) > 0)
+        st = {c: auc[c][0] / amt[c] / mkt for c in cs}
+        traded = [c for c in cs if auc[c][0] > 0 and auc[c][1] is not None]
+        tops = sorted(cs, key=lambda c: -auc[c][0])[:TOP_N]
+        name = names[ths][:48]
+        rows.append(dict(
+            trade_date=d, thscode=ths, concept=name, is_broad=_is_broad(name),
+            prev_date=prev, n_stocks=len(cs),
+            auction_amount=round(a, 2), up_amount=round(up_a, 2), prev_amount=round(p_amt, 2),
+            strength=round(a / p_amt / mkt, 4),
+            up_strength=round(up_a / p_amt / mkt_up, 4),
+            median_strength=round(median(st.values()), 4),
+            n_hot=sum(1 for c in cs if st[c] > HOT_STRENGTH and (auc[c][1] or 0) > 0),
+            up_ratio=round(sum(1 for c in traded if auc[c][1] > 0) / len(traded) * 100, 2)
+            if traded else 0.0,
+            avg_pct=round(sum(auc[c][1] for c in traded) / len(traded), 4) if traded else 0.0,
+            top_share=round(auc[tops[0]][0] / a * 100, 2),
+            mkt_ratio=mkt, mkt_up_ratio=mkt_up,
+            top_json=json.dumps([dict(
+                code=c, name=auc[c][2], auction_amount=auc[c][0],
+                share=round(auc[c][0] / a * 100, 1), auction_pct=auc[c][1],
+                strength=round(st[c], 3)) for c in tops], ensure_ascii=False),
+            created_at=datetime.now(),
+        ))
+    return rows
+
+
+def save_concepts(session, rows: list[dict]) -> int:
+    if not rows:
+        return 0
+    return bulk_upsert(session, AuctionConceptDaily, rows,
+                       update_cols=[k for k in rows[0] if k not in ("trade_date", "thscode")])
+
+
+def run_concepts(d: date) -> int:
+    """只做概念聚合（读已落库的个股竞价，不调接口）。可对任意历史日补跑。"""
+    with session_scope() as s:
+        rows = aggregate_concepts(s, d)
+        n = save_concepts(s, rows)
+    if n:
+        best = max(rows, key=lambda r: r["up_strength"] if not r["is_broad"] else 0)
+        log.info("%s 概念竞价聚合 %d 个，抢筹强度最高：%s %.2f", d, n,
+                 best["concept"], best["up_strength"])
+    else:
+        log.warning("%s 概念竞价聚合为空（无个股竞价或昨日行情）", d)
+    return n
+
+
 def run(d: Optional[date] = None, force: bool = False) -> Optional[dict]:
     d = d or date.today()
     if not force:
@@ -291,6 +398,11 @@ def run(d: Optional[date] = None, force: bool = False) -> Optional[dict]:
              summary["bj_amount"] / 1e8, summary["n_limit_up"], summary["n_limit_down"])
     if len(rows) < len(codes) * 0.95:
         log.warning("返回数仅 %d/%d，当日总额偏低不可信", len(rows), len(codes))
+    # 概念聚合失败不影响已落库的个股/汇总；事后可 --concepts-only 补跑
+    try:
+        run_concepts(d)
+    except Exception:
+        log.exception("%s 概念聚合失败（个股竞价已落库，可 --concepts-only 补跑）", d)
     return summary
 
 
@@ -301,7 +413,13 @@ def _alarm(signum, frame):  # noqa: ARG001
 def main() -> None:
     p = argparse.ArgumentParser(description="开盘集合竞价落库")
     p.add_argument("--force", action="store_true", help="跳过交易日判定")
+    p.add_argument("--concepts-only", action="store_true",
+                   help="只从已落库的个股竞价重算概念聚合（不调接口，可补历史）")
+    p.add_argument("--date", help="配合 --concepts-only，YYYY-MM-DD，默认今天")
     a = p.parse_args()
+    if a.concepts_only:
+        run_concepts(date.fromisoformat(a.date) if a.date else date.today())
+        return
     try:
         signal.signal(signal.SIGALRM, _alarm)
         signal.alarm(TIMEOUT)

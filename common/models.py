@@ -1156,3 +1156,52 @@ class AuctionMarket(Base):
     created_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime, server_default=func.now()
     )
+
+
+class AuctionConceptDaily(Base):
+    """按概念聚合的开盘竞价，每日约 380 行（全部非空概念，**不做过滤**）。
+
+    落库目的：积累后检验「竞价强弱 ↔ 当日板块强弱」的关联——可按 thscode
+    与盘后 `concept_daily`（当日概念涨跌幅）直接 join。过滤口径（单票占比、
+    成分股下限、宽基）留给查询时决定，存全量才能事后换口径重算。
+
+    两种强度，都是相对全市场（1.0 = 持平）：
+    - `strength`   = (概念竞价额 / 概念昨日成交额) ÷ 全市场同比值。**不分买卖方向**，
+      抢筹和出逃都会推高——09-24 地产链强度居前但红盘率仅 10~31%，是出逃
+    - `up_strength` = 只计**竞价红盘**成分股的竞价额，分母仍是全部成分股昨日成交额，
+      ÷ 全市场同口径值。只反映买方抢筹，默认按它排序
+
+    成分映射取落库当时的 `stock_concept`，是当天的快照。
+    """
+
+    __tablename__ = "auction_concept_daily"
+    __table_args__ = (
+        UniqueConstraint("trade_date", "thscode", name="uq_acd_date_ths"),
+    )
+
+    id: Mapped[int] = mapped_column(BigIntPK, primary_key=True, autoincrement=True)
+    trade_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    thscode: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    concept: Mapped[str] = mapped_column(String(48), nullable=False)
+    is_broad: Mapped[bool] = mapped_column(Boolean, default=False, comment="宽基/交易属性标签")
+    prev_date: Mapped[Optional[date]] = mapped_column(Date, comment="强度分母所用的昨日")
+    n_stocks: Mapped[int] = mapped_column(Integer, nullable=False)
+    auction_amount: Mapped[float] = mapped_column(Money, nullable=False, comment="竞价额(元)")
+    up_amount: Mapped[float] = mapped_column(Money, nullable=False, comment="红盘成分竞价额(元)")
+    prev_amount: Mapped[float] = mapped_column(Money, nullable=False, comment="成分昨日成交额(元)")
+    strength: Mapped[float] = mapped_column(Float, nullable=False, comment="相对强度,不分方向")
+    up_strength: Mapped[float] = mapped_column(Float, nullable=False, comment="抢筹强度")
+    median_strength: Mapped[float] = mapped_column(Float, nullable=False)
+    n_hot: Mapped[int] = mapped_column(Integer, nullable=False, comment="个股强度>2且红盘")
+    up_ratio: Mapped[float] = mapped_column(Float, nullable=False, comment="竞价红盘比例%")
+    avg_pct: Mapped[float] = mapped_column(Float, nullable=False, comment="竞价平均涨幅%")
+    top_share: Mapped[float] = mapped_column(Float, nullable=False, comment="最大单票占比%")
+    mkt_ratio: Mapped[float] = mapped_column(Float, nullable=False,
+                                             comment="全市场竞价额/昨日成交额")
+    mkt_up_ratio: Mapped[float] = mapped_column(Float, nullable=False,
+                                                comment="全市场红盘竞价额/昨日成交额")
+    top_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]",
+                                          comment="贡献前3成分股")
+    created_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime, server_default=func.now()
+    )
