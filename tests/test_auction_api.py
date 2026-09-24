@@ -120,6 +120,9 @@ def concepts(session):
         "大盘": [(f"0000{i:02d}", 10e8, 2e6, -0.5) for i in range(1, 31)],
         "强势": [(f"6000{i:02d}", 1e8, 3e6, 2.0) for i in range(1, 11)],
         "出逃": [(f"6010{i:02d}", 1e8, 3.5e6, -2.0) for i in range(1, 11)],
+        # 独苗:唯一红盘票占总额 35.7%(过 40% 线),但占红盘额 100%——09-24 数据确权的形态
+        "独苗": [("603001", 1e8, 3e6, 5.0)]
+                + [(f"6030{i:02d}", 1e8, 0.6e6, -1.0) for i in range(2, 11)],
         "单票撑": [("300001", 1e8, 20e6, 5.0)]
                   + [(f"3000{i:02d}", 1e8, 0.5e6, -1.0) for i in range(2, 11)],
         "小概念": [(f"0001{i:02d}", 1e8, 5e6, 1.0) for i in range(1, 4)],
@@ -156,10 +159,21 @@ def test_concepts_default_up_strength_demotes_selloff(client, concepts):
     assert flee["up_strength"] == 0 and flee["up_ratio"] == 0
 
 
+def test_up_strength_single_red_stock_filtered(client, concepts):
+    """单票过滤要按排序所用的那笔钱判:独苗占总额 35.7% 过得了 top_share,
+    但占红盘额 100%——按抢筹强度排时必须被 up_top_share 拦下。"""
+    lone = next(r for r in concepts if r["concept"] == "独苗")
+    assert lone["top_share"] < 40 and lone["up_top_share"] == 100
+    names = [x["concept"] for x in client.get("/api/auction/concepts").json()["items"]]
+    assert "独苗" not in names
+    by_strength = client.get("/api/auction/concepts", params={"order_by": "strength"}).json()
+    assert "独苗" in [x["concept"] for x in by_strength["items"]]
+
+
 def test_concepts_strength_is_direction_blind(client, concepts):
     r = client.get("/api/auction/concepts", params={"order_by": "strength"}).json()
-    assert [x["concept"] for x in r["items"]] == ["出逃", "强势", "大盘"]
-    big = r["items"][2]
+    assert [x["concept"] for x in r["items"]] == ["出逃", "强势", "独苗", "大盘"]
+    big = next(x for x in r["items"] if x["concept"] == "大盘")
     assert big["strength"] < 1 and big["median_strength"] < 1
 
 
@@ -172,23 +186,23 @@ def test_concepts_amount_order_favours_big_concepts(client, concepts):
 def test_concepts_stored_unfiltered(concepts):
     """落库存全量(含单票撑/小概念/宽基),口径留给查询时决定。"""
     assert {r["concept"] for r in concepts} == {
-        "大盘", "强势", "出逃", "单票撑", "小概念", "融资融券"}
+        "大盘", "强势", "出逃", "独苗", "单票撑", "小概念", "融资融券"}
     assert next(r for r in concepts if r["concept"] == "融资融券")["is_broad"] is True
 
 
 def test_concepts_filters_can_be_relaxed(client, concepts):
     r = client.get("/api/auction/concepts", params={
         "max_top_share": 100, "min_stocks": 1, "include_broad": True, "limit": 50}).json()
-    assert r["total"] == 6
+    assert r["total"] == 7
     one = next(x for x in r["items"] if x["concept"] == "单票撑")
     assert one["top_share"] > 40 and one["top"][0]["code"] == "300001"
 
 
 def test_concepts_market_ratios(client, concepts):
     r = client.get("/api/auction/concepts").json()
-    # 全市场竞价 170.5e6 / 昨日成交 393e8；红盘竞价 = 强势 30e6 + 单票撑 20e6 + 小概念 15e6
-    assert r["market_strength"] == pytest.approx(170.5e6 / 393e8 * 100, abs=1e-3)
-    assert r["market_up_strength"] == pytest.approx(65e6 / 393e8 * 100, abs=1e-3)
+    # 全市场竞价 178.9e6 / 昨日成交 403e8；红盘 = 强势30e6 + 独苗3e6 + 单票撑20e6 + 小概念15e6
+    assert r["market_strength"] == pytest.approx(178.9e6 / 403e8 * 100, abs=1e-3)
+    assert r["market_up_strength"] == pytest.approx(68e6 / 403e8 * 100, abs=1e-3)
 
 
 def test_concepts_rerun_is_idempotent(session, concepts):
@@ -197,7 +211,7 @@ def test_concepts_rerun_is_idempotent(session, concepts):
     for _ in range(2):
         FA.save_concepts(session, FA.aggregate_concepts(session, D2))
         session.commit()
-    assert session.scalar(select(func.count()).select_from(AuctionConceptDaily)) == 6
+    assert session.scalar(select(func.count()).select_from(AuctionConceptDaily)) == 7
 
 
 def test_concepts_bad_order_and_empty(client, session):

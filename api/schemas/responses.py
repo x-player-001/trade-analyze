@@ -951,7 +951,8 @@ class AuctionConceptOut(BaseModel):
     n_hot: int                                # 抢筹只数：个股强度>2 且竞价红盘
     up_ratio: float                           # 竞价红盘比例 %
     avg_pct: float                            # 竞价平均涨幅 %
-    top_share: float                          # 最大单票占比 %
+    top_share: float                          # 最大单票占总竞价额 %
+    up_top_share: float = 0                   # 最大红盘单票占红盘竞价额 %
     top: List[AuctionConceptStockOut] = []
 
 

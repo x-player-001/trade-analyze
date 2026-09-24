@@ -732,6 +732,7 @@ CREATE TABLE IF NOT EXISTS auction_concept_daily (
   up_ratio FLOAT NOT NULL COMMENT '竞价红盘比例%',
   avg_pct FLOAT NOT NULL COMMENT '竞价平均涨幅%',
   top_share FLOAT NOT NULL COMMENT '最大单票占比%',
+  up_top_share FLOAT NOT NULL DEFAULT 0 COMMENT '最大红盘单票占红盘竞价额%',
   mkt_ratio FLOAT NOT NULL COMMENT '全市场竞价额/昨日成交额',
   mkt_up_ratio FLOAT NOT NULL COMMENT '全市场红盘竞价额/昨日成交额',
   top_json TEXT NOT NULL COMMENT '贡献前3成分股',

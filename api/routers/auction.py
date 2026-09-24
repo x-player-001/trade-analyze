@@ -174,7 +174,8 @@ def _concept_out(r: AuctionConceptDaily) -> AuctionConceptOut:
         auction_amount=float(r.auction_amount), up_amount=float(r.up_amount),
         strength=r.strength, up_strength=r.up_strength,
         median_strength=r.median_strength, n_hot=r.n_hot,
-        up_ratio=r.up_ratio, avg_pct=r.avg_pct, top_share=r.top_share, top=top,
+        up_ratio=r.up_ratio, avg_pct=r.avg_pct, top_share=r.top_share,
+        up_top_share=r.up_top_share, top=top,
     )
 
 
@@ -193,7 +194,9 @@ def auction_concepts(
     max_top_share: float = Query(
         40, gt=0, le=100,
         description="最大单票占比上限%——超过说明是一只票在撑，不是板块。"
-                    "实测高压氧舱 75% 竞价额来自三星电气一只。传 100 关闭",
+                    "**按排序所用的那笔钱判**：up_strength 看红盘竞价额里的占比"
+                    "(up_top_share)，其余看总竞价额里的占比(top_share)。"
+                    "实测 09-24 数据确权的新华文轩占总额 39%、占红盘额近乎全部。传 100 关闭",
     ),
     include_broad: bool = Query(False, description="是否包含融资融券/沪股通等宽基标签"),
     session: Session = Depends(get_session),
@@ -205,9 +208,11 @@ def auction_concepts(
     if trade_date is None:
         return AuctionConceptListOut(note="暂无概念竞价数据，每个交易日 9:30 后可用")
 
+    share_col = (AuctionConceptDaily.up_top_share if order_by == "up_strength"
+                 else AuctionConceptDaily.top_share)
     cond = [AuctionConceptDaily.trade_date == trade_date,
             AuctionConceptDaily.n_stocks >= min_stocks,
-            AuctionConceptDaily.top_share <= max_top_share]
+            share_col <= max_top_share]
     if not include_broad:
         cond.append(AuctionConceptDaily.is_broad.is_(False))
     total = session.scalar(

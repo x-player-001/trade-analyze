@@ -1171,6 +1171,10 @@ class AuctionConceptDaily(Base):
     - `up_strength` = 只计**竞价红盘**成分股的竞价额，分母仍是全部成分股昨日成交额，
       ÷ 全市场同口径值。只反映买方抢筹，默认按它排序
 
+    单票主导要**按排序所用的那笔钱**判：`top_share` 占总竞价额，`up_top_share`
+    占红盘竞价额。09-24 数据确权的新华文轩占总额 39%（过 40% 线），
+    但在红盘额里几乎是全部——按 top_share 过滤拦不住。
+
     成分映射取落库当时的 `stock_concept`，是当天的快照。
     """
 
@@ -1196,6 +1200,8 @@ class AuctionConceptDaily(Base):
     up_ratio: Mapped[float] = mapped_column(Float, nullable=False, comment="竞价红盘比例%")
     avg_pct: Mapped[float] = mapped_column(Float, nullable=False, comment="竞价平均涨幅%")
     top_share: Mapped[float] = mapped_column(Float, nullable=False, comment="最大单票占比%")
+    up_top_share: Mapped[float] = mapped_column(
+        Float, nullable=False, default=0, comment="最大红盘单票占红盘竞价额%")
     mkt_ratio: Mapped[float] = mapped_column(Float, nullable=False,
                                              comment="全市场竞价额/昨日成交额")
     mkt_up_ratio: Mapped[float] = mapped_column(Float, nullable=False,

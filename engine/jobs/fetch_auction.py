@@ -316,7 +316,8 @@ def aggregate_concepts(session, d: date) -> list[dict]:
         if not a:
             continue
         p_amt = sum(amt[c] for c in cs)
-        up_a = sum(auc[c][0] for c in cs if (auc[c][1] or 0) > 0)
+        reds = [auc[c][0] for c in cs if (auc[c][1] or 0) > 0]
+        up_a = sum(reds)
         st = {c: auc[c][0] / amt[c] / mkt for c in cs}
         traded = [c for c in cs if auc[c][0] > 0 and auc[c][1] is not None]
         tops = sorted(cs, key=lambda c: -auc[c][0])[:TOP_N]
@@ -333,6 +334,7 @@ def aggregate_concepts(session, d: date) -> list[dict]:
             if traded else 0.0,
             avg_pct=round(sum(auc[c][1] for c in traded) / len(traded), 4) if traded else 0.0,
             top_share=round(auc[tops[0]][0] / a * 100, 2),
+            up_top_share=round(max(reds) / up_a * 100, 2) if up_a else 0.0,
             mkt_ratio=mkt, mkt_up_ratio=mkt_up,
             top_json=json.dumps([dict(
                 code=c, name=auc[c][2], auction_amount=auc[c][0],
