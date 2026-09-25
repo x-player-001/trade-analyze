@@ -308,3 +308,17 @@ def test_confirm_refuses_before_pipeline_catches_up(session):
     session.commit()
     assert live.confirm(session, ad) == 0            # 拒绝回填
     assert session.query(WatchPullbackAlert).one().confirmed is None
+
+
+@pytest.mark.parametrize("open_", [False, None])
+def test_main_skips_on_non_trading_day(monkeypatch, open_):
+    """2026-09-25 中秋：快照返回上个交易日收盘价，照常预判发出了 45 条假预警。
+    日历取不到(None)同样跳过。"""
+    monkeypatch.setattr(live, "is_trading_day", lambda d: open_)
+
+    def boom(*a, **k):
+        raise AssertionError("休市日不该走到预判")
+    monkeypatch.setattr(live, "run", boom)
+    monkeypatch.setattr(live, "session_scope", boom)
+    monkeypatch.setattr("sys.argv", ["watch_pullback_live"])
+    live.main()

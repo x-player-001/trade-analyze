@@ -11,7 +11,7 @@
 
 **休市日必须跳过**：cron 按 1-5 触发，节假日（如 2026-09-25 中秋）
 快照返回的是上个交易日的竞价，若照常落库会被打上今天的日期——
-一条看着完全正常的假数据。交易日判定：同花顺交易日历为主，tushare `trade_cal` 兜底。
+一条看着完全正常的假数据。交易日判定见 `engine.datasource.trade_cal`。
 
 接口单次最多 100 只（超出报 `code=1003 thscodes count must not exceed 100`），
 全市场约 56 批、实测 3.3 分钟。
@@ -27,9 +27,8 @@ import argparse
 import json
 import signal
 import time
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from decimal import ROUND_HALF_UP, Decimal
-from pathlib import Path
 from statistics import median
 from typing import Optional
 
@@ -41,6 +40,7 @@ from common.models import AuctionConceptDaily, AuctionMarket, AuctionStock, Dail
 from common.upsert import bulk_upsert
 from engine.datasource.classify import classify_board, is_st_name, price_limit_pct
 from engine.datasource.hithink_source import HithinkSource
+from engine.datasource.trade_cal import is_trading_day
 from engine.jobs.watch_pullback_live import to_thscode
 
 log = setup_logging("fetch_auction")
@@ -50,8 +50,6 @@ SOFT_DEADLINE = 15 * 60   # 抓取软截止：到点停止抓取，保存已取�
 TIMEOUT = 20 * 60         # 进程硬墙钟（akshare 挂 13 小时的教训），须晚于软截止留出落库时间
 RETRY_PASSES = 2          # 网络失败的批次整批重试轮数
 RETRY_PAUSE = 10          # 每轮重试前等待秒数
-CAL_AHEAD = 90            # 交易日历一次拉 90 天，一季度只需请求一次
-CAL_CACHE = Path(__file__).resolve().parents[2] / "logs" / "trade_cal_cache.json"
 
 
 def _f(v, default=None):
@@ -59,59 +57,6 @@ def _f(v, default=None):
         return float(v)
     except (TypeError, ValueError):
         return default
-
-
-def _load_cal_cache() -> dict[str, bool]:
-    try:
-        return json.loads(CAL_CACHE.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
-
-
-def is_trading_day(d: date, src: Optional[HithinkSource] = None) -> Optional[bool]:
-    """交易日判定。取不到返回 None（由调用方决定怎么办）。
-
-    **主判据是同花顺交易日历**（不限频，交易日盘中已含当日）。但它只给
-    「过去一年到今天」，**今天不在列表里有两种可能**：真休市，或当天列表
-    还没更新——后者若直接判休市，当天竞价就永久丢了。故「不在」时再问
-    tushare 确认；「在」时直接放行，正常交易日根本不碰 tushare。
-    """
-    try:
-        if d.strftime("%Y%m%d") in (src or HithinkSource()).trading_days():
-            return True
-    except Exception as e:  # noqa: BLE001
-        log.warning("同花顺交易日历获取失败: %s —— 转 tushare", str(e)[:120])
-    return _tushare_is_open(d)
-
-
-def _tushare_is_open(d: date) -> Optional[bool]:
-    """tushare 交易日历（兜底）。
-
-    **trade_cal 限 1 次/小时**（实测 2026-09-23，测试调过一次后正式运行
-    即被拒）。故一次拉 CAL_AHEAD 天存本地，命中缓存不发请求。
-    """
-    key = d.isoformat()
-    cache = _load_cal_cache()
-    if key in cache:
-        return cache[key]
-    try:
-        from engine.datasource.tushare_source import TushareSource
-        df = TushareSource().pro.trade_cal(
-            exchange="SSE", start_date=d.strftime("%Y%m%d"),
-            end_date=(d + timedelta(days=CAL_AHEAD)).strftime("%Y%m%d"))
-        if df is None or df.empty:
-            return None
-        for cd, is_open in zip(df["cal_date"], df["is_open"]):
-            cache[f"{cd[:4]}-{cd[4:6]}-{cd[6:]}"] = bool(int(is_open))
-        try:
-            CAL_CACHE.parent.mkdir(parents=True, exist_ok=True)
-            CAL_CACHE.write_text(json.dumps(cache, sort_keys=True), encoding="utf-8")
-        except OSError as e:
-            log.warning("交易日历缓存写入失败: %s", e)
-        return cache.get(key)
-    except Exception as e:  # noqa: BLE001
-        log.warning("交易日历获取失败: %s", str(e)[:120])
-        return None
 
 
 def load_codes(session) -> list[str]:

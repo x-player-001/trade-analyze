@@ -1,26 +1,21 @@
-"""每日全流程：数据增量更新 → 选股 → 验证回填。cron 盘后调用一次。
+"""每日全流程：日线更新 → 监控池 → 热点/情绪落库 → LLM 复盘。cron 盘后调用一次。
 
-    30 15 * * 1-5  python -m engine.jobs.daily_pipeline
+    30 18 * * 1-5  python -m engine.jobs.daily_pipeline
 
-任一环节失败记录日志并继续（验证回填不依赖当日选股成功）。
+任一环节失败记录日志并继续。
+
+选股(v1/v2)与验证回填已于 2026-09-25 停跑：实盘无正向 edge。
+代码仍在 engine/selection、engine/validation，需要时可手工调用。
 """
 from __future__ import annotations
 
 import signal
 from datetime import date
 
-from sqlalchemy import func, select
-
 from common.db import session_scope
 from common.logging_conf import setup_logging
-from common.models import DailyQuote
-from common.params import (
-    load_params_by_version,
-    seed_default_params,
-)
 from engine.datasource.pipeline import sync_daily_all
 from engine.datasource.tushare_source import TushareSource
-from engine.selection.selector import run_selection_multi
 from engine.jobs.fetch_hotspot import run as fetch_hotspot
 from engine.jobs.llm_review import run as llm_review
 from engine.jobs.fetch_sentiment import run as fetch_sentiment
@@ -30,11 +25,8 @@ from engine.jobs.watch_pool import detect_new_entries, track_daily
 from engine.jobs.watch_pullback import advance_pending as advance_pullback
 from engine.jobs.watch_pullback import detect_new_entries as detect_pullback
 from engine.jobs.watch_pullback import track_daily as track_pullback
-from engine.validation.validator import backfill_validations
 
 log = setup_logging("daily_pipeline")
-
-VERSIONS = ["v1", "v2"]   # A套(不看板块) / B套(结合板块)
 
 # 整条管线的墙钟上限。正常跑完约 3~5 分钟，给 40 分钟余量。
 # **必须有这道闸**：2026-09-22 的 cron 卡在 fetch_sentiment(akshare 无超时)
@@ -72,32 +64,9 @@ def main() -> None:
     except Exception:
         log.exception("日线更新失败,继续后续步骤(用已有数据)")
 
-    # 2. 选股：v1/v2 双版本共享加载,对库内最新交易日一次跑完(行情只加载一遍)
-    try:
-        with session_scope() as s:
-            seed_default_params(s)
-        with session_scope() as s:
-            latest = s.scalar(select(func.max(DailyQuote.trade_date)))
-        if latest is None:
-            log.error("库内无行情,跳过选股")
-        else:
-            with session_scope() as s:
-                version_params = {ver: load_params_by_version(s, ver) for ver in VERSIONS}
-                run_selection_multi(s, latest, version_params)
-    except Exception:
-        log.exception("选股阶段失败")
-
-    # 3. 验证回填（对所有版本的历史快照统一回填 T+1/2/3）
-    try:
-        with session_scope() as s:
-            params = load_params_by_version(s, "v1")
-            backfill_validations(s, params)
-    except Exception:
-        log.exception("验证回填失败")
-
-    # 4. 监控池三形态：低位首板 / 低位放量 / 突破回踩。各自独立表与标签——
+    # 2. 监控池三形态：低位首板 / 低位放量 / 突破回踩。各自独立表与标签——
     #    曾把两形态塞进同一张表被迫共用涨停标签，命中率失真到17.97%。
-    #    与选股完全独立(不同形态、不同验证口径)，失败不影响前三步已完成的工作。
+    #    与选股完全独立(不同形态、不同验证口径)，失败不影响已完成的日线更新。
     try:
         with session_scope() as s:
             detect_new_entries(s, lookback_days=1)      # 形态1:低位首板
@@ -118,14 +87,14 @@ def main() -> None:
     except Exception:
         log.exception("监控池更新失败")
 
-    # 5. 热点快照：概念板块 + 涨停题材落库（盘中看板走实时接口，这里只积累历史）。
+    # 3. 热点快照：概念板块 + 涨停题材落库（盘中看板走实时接口，这里只积累历史）。
     #    同花顺只给板块当前快照、无批量历史接口，不每天存就永远补不回来。
     try:
         fetch_hotspot()
     except Exception:
         log.exception("热点快照失败")
 
-    # 6. 市场情绪：连板梯队 + 6阶段周期落库。
+    # 4. 市场情绪：连板梯队 + 6阶段周期落库。
     #    曾漏接导致 market_sentiment 停更两天(09-09 而行情已到 09-11)。
     #    盘中实时阶段走 /api/hotspot/sentiment，本步只负责积累历史序列。
     try:
@@ -133,8 +102,8 @@ def main() -> None:
     except Exception:
         log.exception("情绪快照失败")
 
-    # 7. LLM 盘后复盘：当日触发的回踩池个股 + 板块轮动。
-    #    **必须排在 fetch_hotspot(第5步)之后**——板块复盘读 concept_daily，
+    # 5. LLM 盘后复盘：当日触发的回踩池个股 + 板块轮动。
+    #    **必须排在 fetch_hotspot(第3步)之后**——板块复盘读 concept_daily，
     #    热点没落库时它只能拿到昨天的序列，会把昨天的主线说成今天的。
     #    外部 API 调用，失败不影响任何已落库数据，故放最后。
     try:

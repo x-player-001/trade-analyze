@@ -34,7 +34,8 @@ tushare 日线只有收盘后才有。同花顺 `/a-share/prices/snapshot` 是�
 实测盘中 10:30/11:00/15:40 均能拿到数据。
 
 用法：
-    python -m engine.jobs.watch_pullback_live          # 预警当日
+    python -m engine.jobs.watch_pullback_live          # 预警当日（非交易日自动跳过）
+    python -m engine.jobs.watch_pullback_live --force  # 跳过交易日判定
     cron: 45 14 * * 1-5
 """
 from __future__ import annotations
@@ -50,6 +51,7 @@ from common.logging_conf import setup_logging
 from common.models import DailyQuote, WatchPullback, WatchPullbackAlert
 from common.upsert import bulk_upsert
 from engine.datasource.hithink_source import HithinkSource
+from engine.datasource.trade_cal import is_trading_day
 from engine.jobs.watch_pullback import (
     MA_TOL,
     MA_WINDOW,
@@ -272,6 +274,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="突破回踩池盘中预警")
     ap.add_argument("--confirm", metavar="YYYY-MM-DD",
                     help="回填指定日预警的收盘确认结果")
+    ap.add_argument("--force", action="store_true", help="跳过交易日判定")
     args = ap.parse_args()
 
     if args.confirm:
@@ -280,6 +283,15 @@ def main() -> None:
         return
 
     log.info("===== 回踩池盘中预警启动 =====")
+    if not args.force:
+        # 【休市日必须跳过】cron 按 1-5 触发，2026-09-25 中秋照跑，同花顺快照
+        # 返回的是上个交易日收盘价，照常预判发出了 45 条假预警。
+        # 取不到日历(None)也跳过：日历和实时价同走同花顺，日历挂了取价多半也挂。
+        open_ = is_trading_day(date.today())
+        if open_ is not True:
+            log.info("%s %s，跳过", date.today(),
+                     "非交易日" if open_ is False else "无法确认是否交易日")
+            return
     with session_scope() as s:
         run(s)
     with session_scope() as s:
