@@ -16,9 +16,11 @@ from common.db import session_scope
 from common.logging_conf import setup_logging
 from engine.datasource.pipeline import sync_daily_all
 from engine.datasource.tushare_source import TushareSource
+from engine.jobs.box_breakout import snapshot as snapshot_box
 from engine.jobs.fetch_hotspot import run as fetch_hotspot
 from engine.jobs.llm_review import run as llm_review
 from engine.jobs.fetch_sentiment import run as fetch_sentiment
+from engine.jobs.trend_pullback import snapshot as snapshot_trend
 from engine.jobs.watch_lowvol import detect_new_entries as detect_lowvol
 from engine.jobs.watch_lowvol import track_and_settle as settle_lowvol
 from engine.jobs.watch_pool import detect_new_entries, track_daily
@@ -86,6 +88,15 @@ def main() -> None:
             track_pullback(s)                           # 回踩池:结算涨停+收益
     except Exception:
         log.exception("监控池更新失败")
+
+    # 2b. 结构识别快照：强势上涨+健康回调 / 长期平台突破。只识别不报警，
+    #     供前端展示后由用户自行判断。只读 daily_quote，休市日当天无行情则写 0 行。
+    for name, snap in (("强势回调结构", snapshot_trend), ("平台突破结构", snapshot_box)):
+        try:
+            with session_scope() as s:
+                snap(s, today, today)
+        except Exception:
+            log.exception("%s快照失败", name)
 
     # 3. 热点快照：概念板块 + 涨停题材落库（盘中看板走实时接口，这里只积累历史）。
     #    同花顺只给板块当前快照、无批量历史接口，不每天存就永远补不回来。

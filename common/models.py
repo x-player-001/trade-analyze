@@ -1211,3 +1211,91 @@ class AuctionConceptDaily(Base):
     created_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime, server_default=func.now()
     )
+
+
+# ---------------------------------------------------------------------------
+# 结构识别快照（只识别不报警，用户自行判断是否入场）
+# ---------------------------------------------------------------------------
+class StructTrendPullback(Base):
+    """强势上涨 + 健康回调 结构的每日快照。job: engine/jobs/trend_pullback.py。
+
+    每个交易日一行/票，只存当日处于 pullback / breakout 阶段的票。
+    宽松口径全量落库，`is_fine` 标精选口径（用户逐只标注反推），API 默认只出精选。
+    价格为原始价（展示用）；比例类字段按 pct_chg 连乘口径计算（除权安全）。
+    """
+
+    __tablename__ = "struct_trend_pullback"
+    __table_args__ = (
+        UniqueConstraint("trade_date", "code", name="uq_stp_date_code"),
+    )
+
+    id: Mapped[int] = mapped_column(BigIntPK, primary_key=True, autoincrement=True)
+    trade_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    code: Mapped[str] = mapped_column(String(10), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(32), nullable=False, default="")
+    state: Mapped[str] = mapped_column(String(12), nullable=False, comment="pullback/breakout")
+    is_fine: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False,
+                                          comment="是否满足精选口径")
+    close: Mapped[Optional[float]] = mapped_column(Price, comment="当日原始收盘")
+    leg_low_date: Mapped[date] = mapped_column(Date, nullable=False)
+    leg_low: Mapped[float] = mapped_column(Price, comment="上涨段段首最低收盘")
+    peak_date: Mapped[date] = mapped_column(Date, nullable=False)
+    peak: Mapped[float] = mapped_column(Price, comment="上涨段峰值收盘")
+    leg_gain: Mapped[float] = mapped_column(Float, comment="上涨段涨幅%")
+    leg_days: Mapped[int] = mapped_column(Integer)
+    leg_limitups: Mapped[int] = mapped_column(Integer, comment="上涨段涨停数")
+    leg_above_ma10: Mapped[float] = mapped_column(Float, comment="上涨段收盘≥MA10天数占比")
+    leg_overlap: Mapped[float] = mapped_column(Float, comment="上涨段相邻K线实体重叠度")
+    pb_start: Mapped[Optional[date]] = mapped_column(Date)
+    pb_days: Mapped[int] = mapped_column(Integer, comment="回调已持续交易日")
+    max_dd: Mapped[float] = mapped_column(Float, comment="回调段收盘最深回撤%(负)")
+    retrace: Mapped[float] = mapped_column(Float, comment="回吐上涨段涨幅%")
+    amt_ratio: Mapped[Optional[float]] = mapped_column(Float, comment="回调均额/上涨段末10日均额")
+    pb_below_ma20: Mapped[int] = mapped_column(Integer, comment="回调段收盘在MA20下方天数")
+    ref: Mapped[float] = mapped_column(Price, comment="突破参照价(箱体上沿,原始价)")
+    fake_breaks: Mapped[str] = mapped_column(String(128), nullable=False, default="",
+                                             comment="假突破日期,逗号分隔")
+    breakout_date: Mapped[Optional[date]] = mapped_column(Date)
+    created_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime, server_default=func.now()
+    )
+
+
+class StructBoxBreakout(Base):
+    """长期盘整平台突破结构的每日快照。job: engine/jobs/box_breakout.py。
+
+    阶段：tl_break 突破下降趋势线 → tl_retest 回踩趋势线 → box_break 突破平台顶
+    → box_retest 回踩平台顶。每日一行/票，只存当日处于形态中的票；
+    `event` 非空表示该阶段【当日】发生。收紧阈值（前段涨幅/平台深度）不在
+    落库时过滤，由 API 参数控制。
+    """
+
+    __tablename__ = "struct_box_breakout"
+    __table_args__ = (
+        UniqueConstraint("trade_date", "code", name="uq_sbb_date_code"),
+    )
+
+    id: Mapped[int] = mapped_column(BigIntPK, primary_key=True, autoincrement=True)
+    trade_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    code: Mapped[str] = mapped_column(String(10), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(32), nullable=False, default="")
+    stage: Mapped[str] = mapped_column(String(12), nullable=False,
+                                       comment="tl_break/tl_retest/box_break/box_retest")
+    event: Mapped[str] = mapped_column(String(12), nullable=False, default="",
+                                       comment="当日发生的事件,空=无")
+    close: Mapped[Optional[float]] = mapped_column(Price, comment="当日原始收盘")
+    top_date: Mapped[date] = mapped_column(Date, nullable=False)
+    top: Mapped[float] = mapped_column(Price, comment="平台顶(原始价最高)")
+    touch_date: Mapped[date] = mapped_column(Date, nullable=False, comment="趋势线第二触点")
+    slope_pct: Mapped[float] = mapped_column(Float, comment="趋势线每日下移,占平台顶%")
+    box_days: Mapped[int] = mapped_column(Integer, comment="平台顶→突破趋势线 交易日")
+    box_depth: Mapped[float] = mapped_column(Float, comment="平台底较平台顶%(负)")
+    prior_gain: Mapped[float] = mapped_column(Float, comment="平台顶较前60日最低%")
+    tl_line: Mapped[float] = mapped_column(Price, comment="当日趋势线价位(原始价)")
+    tl_break: Mapped[date] = mapped_column(Date, nullable=False)
+    tl_retest: Mapped[Optional[date]] = mapped_column(Date)
+    box_break: Mapped[Optional[date]] = mapped_column(Date)
+    box_retest: Mapped[Optional[date]] = mapped_column(Date)
+    created_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime, server_default=func.now()
+    )

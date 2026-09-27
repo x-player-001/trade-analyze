@@ -742,3 +742,65 @@ CREATE TABLE IF NOT EXISTS auction_concept_daily (
   KEY idx_acd_ths (thscode)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
   COMMENT='按概念聚合的开盘竞价';
+
+-- 强势上涨 + 健康回调 结构快照（只识别不报警）
+CREATE TABLE IF NOT EXISTS struct_trend_pullback (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  trade_date DATE NOT NULL,
+  code VARCHAR(10) NOT NULL,
+  name VARCHAR(32) NOT NULL DEFAULT '',
+  state VARCHAR(12) NOT NULL COMMENT 'pullback/breakout',
+  is_fine TINYINT(1) NOT NULL DEFAULT 0 COMMENT '是否满足精选口径',
+  close DECIMAL(12,3) NULL COMMENT '当日原始收盘',
+  leg_low_date DATE NOT NULL,
+  leg_low DECIMAL(12,3) NOT NULL COMMENT '上涨段段首最低收盘',
+  peak_date DATE NOT NULL,
+  peak DECIMAL(12,3) NOT NULL COMMENT '上涨段峰值收盘',
+  leg_gain FLOAT NOT NULL COMMENT '上涨段涨幅%',
+  leg_days INT NOT NULL,
+  leg_limitups INT NOT NULL COMMENT '上涨段涨停数',
+  leg_above_ma10 FLOAT NOT NULL COMMENT '上涨段收盘≥MA10天数占比',
+  leg_overlap FLOAT NOT NULL COMMENT '上涨段相邻K线实体重叠度',
+  pb_start DATE NULL,
+  pb_days INT NOT NULL COMMENT '回调已持续交易日',
+  max_dd FLOAT NOT NULL COMMENT '回调段收盘最深回撤%(负)',
+  retrace FLOAT NOT NULL COMMENT '回吐上涨段涨幅%',
+  amt_ratio FLOAT NULL COMMENT '回调均额/上涨段末10日均额',
+  pb_below_ma20 INT NOT NULL COMMENT '回调段收盘在MA20下方天数',
+  ref DECIMAL(12,3) NOT NULL COMMENT '突破参照价(箱体上沿,原始价)',
+  fake_breaks VARCHAR(128) NOT NULL DEFAULT '' COMMENT '假突破日期,逗号分隔',
+  breakout_date DATE NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE KEY uq_stp_date_code (trade_date, code),
+  KEY idx_stp_date (trade_date),
+  KEY idx_stp_code (code)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+  COMMENT='强势上涨+健康回调结构快照';
+
+-- 长期盘整平台突破结构快照（只识别不报警）
+CREATE TABLE IF NOT EXISTS struct_box_breakout (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  trade_date DATE NOT NULL,
+  code VARCHAR(10) NOT NULL,
+  name VARCHAR(32) NOT NULL DEFAULT '',
+  stage VARCHAR(12) NOT NULL COMMENT 'tl_break/tl_retest/box_break/box_retest',
+  event VARCHAR(12) NOT NULL DEFAULT '' COMMENT '当日发生的事件,空=无',
+  close DECIMAL(12,3) NULL COMMENT '当日原始收盘',
+  top_date DATE NOT NULL,
+  top DECIMAL(12,3) NOT NULL COMMENT '平台顶(原始价最高)',
+  touch_date DATE NOT NULL COMMENT '趋势线第二触点',
+  slope_pct FLOAT NOT NULL COMMENT '趋势线每日下移,占平台顶%',
+  box_days INT NOT NULL COMMENT '平台顶→突破趋势线 交易日',
+  box_depth FLOAT NOT NULL COMMENT '平台底较平台顶%(负)',
+  prior_gain FLOAT NOT NULL COMMENT '平台顶较前60日最低%',
+  tl_line DECIMAL(12,3) NOT NULL COMMENT '当日趋势线价位(原始价)',
+  tl_break DATE NOT NULL,
+  tl_retest DATE NULL,
+  box_break DATE NULL,
+  box_retest DATE NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE KEY uq_sbb_date_code (trade_date, code),
+  KEY idx_sbb_date (trade_date),
+  KEY idx_sbb_code (code)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+  COMMENT='长期盘整平台突破结构快照';

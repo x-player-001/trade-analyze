@@ -13,6 +13,7 @@ from sqlalchemy import text
 
 from api.routers import (
     auction,
+    box_breakout,
     concept,
     favorite,
     hotspot,
@@ -25,6 +26,7 @@ from api.routers import (
     review,
     rotation,
     sentiment,
+    trend_pullback,
     validation,
     watch,
 )
@@ -66,6 +68,8 @@ app.include_router(pool_limitup.router)
 app.include_router(rotation.router)
 app.include_router(review.router)
 app.include_router(auction.router)
+app.include_router(trend_pullback.router)
+app.include_router(box_breakout.router)
 
 
 @app.get("/health", tags=["meta"], summary="健康检查")

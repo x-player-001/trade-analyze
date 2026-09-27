@@ -972,3 +972,78 @@ class AuctionStockListOut(BaseModel):
     total: int = 0
     items: List[AuctionStockOut] = []
     note: Optional[str] = None
+
+
+
+# ---------------------------------------------------------------------------
+# 结构识别（只识别不报警）
+# ---------------------------------------------------------------------------
+class TrendPullbackOut(ORMModel):
+    """强势上涨 + 健康回调 结构中的一只票（某交易日快照）。价格为原始价。"""
+    trade_date: date
+    code: str
+    name: str = ""
+    state: str                                # pullback 回调中 / breakout 已突破(3日内)
+    is_fine: bool                             # 是否满足精选口径
+    close: Optional[float] = None
+    leg_low_date: date
+    leg_low: float
+    peak_date: date
+    peak: float
+    leg_gain: float                           # 上涨段涨幅%
+    leg_days: int
+    leg_limitups: int
+    leg_above_ma10: float                     # 0~1
+    leg_overlap: float                        # 0~1，越大越像「通道」
+    pb_start: Optional[date] = None
+    pb_days: int
+    max_dd: float                             # 回调段最深回撤%(负)
+    retrace: float                            # 回吐上涨段涨幅%
+    amt_ratio: Optional[float] = None         # 回调均额 / 上涨段末10日均额
+    pb_below_ma20: int
+    ref: float                                # 突破参照价（箱体上沿）
+    dist_to_ref: Optional[float] = None       # 收盘距参照价%（负=在参照价下方）
+    fake_breaks: List[date] = []
+    breakout_date: Optional[date] = None
+
+
+class TrendPullbackListOut(BaseModel):
+    trade_date: Optional[date] = None
+    fine_only: bool = True
+    total: int = 0
+    counts: Dict[str, int] = {}               # {pullback: n, breakout: n}
+    items: List[TrendPullbackOut] = []
+    note: str = ""
+
+
+class BoxBreakoutOut(ORMModel):
+    """长期盘整平台突破结构中的一只票（某交易日快照）。价格为原始价。"""
+    trade_date: date
+    code: str
+    name: str = ""
+    stage: str                                # tl_break/tl_retest/box_break/box_retest
+    event: str = ""                           # 当日发生的事件，空=无
+    stage_date: Optional[date] = None         # 当前阶段发生的日期
+    stage_age: Optional[int] = None           # 距当前阶段发生已过几个交易日
+    close: Optional[float] = None
+    top_date: date
+    top: float                                # 平台顶
+    dist_to_top: Optional[float] = None       # 收盘距平台顶%
+    touch_date: date                          # 趋势线第二触点
+    slope_pct: float
+    box_days: int
+    box_depth: float
+    prior_gain: float
+    tl_line: float                            # 当日趋势线价位
+    tl_break: date
+    tl_retest: Optional[date] = None
+    box_break: Optional[date] = None
+    box_retest: Optional[date] = None
+
+
+class BoxBreakoutListOut(BaseModel):
+    trade_date: Optional[date] = None
+    total: int = 0
+    counts: Dict[str, int] = {}               # 各阶段数量
+    items: List[BoxBreakoutOut] = []
+    note: str = ""
