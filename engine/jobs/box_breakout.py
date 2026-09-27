@@ -18,8 +18,9 @@
     趋势线     从 A 出发，连到 A 之后的摆动高点（前后各 PIVOT_K 日内最高）中
                斜率最大（最平）的一个；斜率须 < 0。只用已确认的摆动高点——
                否则平台早期一根反弹就能连出一条陡线（603986 的 03-16 涨停
-               会被误判为突破）
-    tl_break    收盘站上趋势线（前一日在线下）；趋势线自此冻结
+               会被误判为突破）；且该触点须是真反弹高点（反弹 ≥TOUCH_REBOUND%、
+               位于平台上半部），否则两点连线无意义（000012 反例）
+    tl_break   收盘站上趋势线（前一日在线下）；趋势线自此冻结
     tl_retest   突破后回落，最低价回到趋势线 +RETEST_TOL% 以内、收盘未跌破
                 线 -RETEST_TOL%，且当日收盘低于突破以来最高收盘（确实在回调）
     box_break   收盘 > 平台顶 A
@@ -60,6 +61,15 @@ BOX_MIN_DAYS = 30       # 平台顶到突破趋势线至少间隔的交易日
 BOX_MAX_DEPTH = 40.0    # 平台底较平台顶最深回撤%（超过算下跌趋势，不是平台）
 PIVOT_K = 3             # 摆动高点：前后各 K 日内最高
 TOUCH_MIN_GAP = 5       # 趋势线第二触点距平台顶至少 N 日
+# 第二触点必须是【平台内的一次反弹高点】，不能只是底部横盘的上沿。
+# 用户指出 000012 南玻A「从最高点到最近高点连一根线太牵强，随便两个点都能连线」：
+# 它 07-01 见顶后两周急跌 24%、之后在 3.7~3.9 横了两个月，所谓触点 09-11 高 3.84
+# 只比横盘底高 3.8%，两点之间最高价全程在线下 13~24%——线从未被价格触碰过，
+# 连出来的是「急跌+横盘」，不是「平台内高点逐级降低」。
+# 603986 的触点 03-18 高 313.68 比其前低 272.59 反弹 +15%，位于平台上半部。
+# 未采用「≥3 个触点」：603986 自己的趋势线也只触碰两次（02-24、03-18）。
+TOUCH_REBOUND = 8.0     # 触点高点较（平台顶→触点之间）最低点的反弹幅度下限%
+TOUCH_POS = 0.5         # 触点在平台中的相对位置下限：(触点高-平台底)/(平台顶-平台底)
 RETEST_TOL = 3.0        # 回踩容差%
 FAIL_PCT = 5.0          # 跌破参照线此比例视为失败%
 TL_MAX_DAYS = 40        # 突破趋势线后最多等多少日突破平台顶
@@ -144,8 +154,13 @@ def scan_series(code: str, bars: list[tuple]) -> dict:
                 continue
             ln_today = H[a_] + sl * (i - a_)
             ln_prev = H[a_] + sl * (i - 1 - a_)
-            depth = (min(L[a_ + 1:i]) / H[a_] - 1) * 100
-            if C[i] > ln_today and C[i - 1] <= ln_prev and -depth <= BOX_MAX_DEPTH:
+            box_low = min(L[a_ + 1:i])
+            depth = (box_low / H[a_] - 1) * 100
+            # 第二触点必须是一次真反弹的高点，否则两点连线无意义（见 TOUCH_* 注释）
+            rebound = (H[tk] / min(L[a_ + 1:tk]) - 1) * 100
+            touch_pos = (H[tk] - box_low) / (H[a_] - box_low)
+            if (C[i] > ln_today and C[i - 1] <= ln_prev and -depth <= BOX_MAX_DEPTH
+                    and rebound >= TOUCH_REBOUND and touch_pos >= TOUCH_POS):
                 a, slope, top_adj, t0, hi_since = a_, sl, H[a_], i, C[i]
                 p0 = max(0, a - 60)
                 cur = Pattern(

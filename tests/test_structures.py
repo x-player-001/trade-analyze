@@ -89,6 +89,17 @@ def test_box_breakout_no_break_on_early_steep_line(bars603986):
     assert daily[D("2026-03-16")][0] == ""
 
 
+def test_box_breakout_000012_crash_then_flat_is_not_a_platform():
+    """反例（用户否决）：000012 07-01 见顶后急跌、底部横盘两个月，
+    「顶点 → 横盘上沿 09-11」两点连线牵强，不得识别为破线。"""
+    p = Path(__file__).parent / "data" / "000012.csv"
+    with p.open(encoding="utf-8") as f:
+        rows = [dict(r, trade_date=D(r["trade_date"])) for r in csv.DictReader(f)]
+    daily = BB.scan_series("000012", _bb_bars(rows, D("2025-06-01")))
+    hits = [d for d, (e, _) in daily.items() if e and d >= D("2026-09-01")]
+    assert hits == []
+
+
 # ---------------------------------------------------------------------------
 # 落库 + 接口
 # ---------------------------------------------------------------------------
