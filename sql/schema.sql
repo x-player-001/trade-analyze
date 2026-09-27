@@ -794,6 +794,8 @@ CREATE TABLE IF NOT EXISTS struct_box_breakout (
   box_depth FLOAT NOT NULL COMMENT '平台底较平台顶%(负)',
   prior_gain FLOAT NOT NULL COMMENT '平台顶较前60日最低%',
   tl_line DECIMAL(12,3) NOT NULL COMMENT '当日趋势线价位(原始价)',
+  range_top DECIMAL(12,3) NULL COMMENT '破线日前10日最高价(近期整理区间上沿)',
+  brk_ref DECIMAL(12,3) NULL COMMENT '破线后参照价=max(趋势线,区间上沿),回踩/失败按它判',
   tl_break DATE NOT NULL,
   tl_retest DATE NULL,
   box_break DATE NULL,

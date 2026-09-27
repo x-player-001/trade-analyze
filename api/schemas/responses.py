@@ -1035,6 +1035,8 @@ class BoxBreakoutOut(ORMModel):
     box_depth: float
     prior_gain: float
     tl_line: float                            # 当日趋势线价位
+    range_top: Optional[float] = None         # 破线日前10日最高价（近期整理区间上沿）
+    brk_ref: Optional[float] = None           # 破线后参照价 = max(趋势线, 区间上沿)，水平线
     tl_break: date
     tl_retest: Optional[date] = None
     box_break: Optional[date] = None

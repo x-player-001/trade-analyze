@@ -5,7 +5,7 @@
     盘整平台  平台顶 331（01-29 / 02-24 双顶），平台底 03-31 236.86，约 60 交易日
     下降趋势线 02-24 高 331.16 → 03-18 高 313.68，逐日约 -1.09
     突破趋势线 04-20/04-21（04-20 收盘 290.54 恰在线上，04-21 有效站上）
-    回踩趋势线 04-24 低 292.81，距线 +2%
+    回踩       04-23 低 301.9 / 04-24 低 292.81，回到破线参照价 295.96 附近
     突破平台顶 05-06 涨停 344.29
     回踩平台顶 05-08 低 331.80，踩在平台顶 331.16 上
 
@@ -20,12 +20,13 @@
                否则平台早期一根反弹就能连出一条陡线（603986 的 03-16 涨停
                会被误判为突破）；且该触点须是真反弹高点（反弹 ≥TOUCH_REBOUND%、
                位于平台上半部），否则两点连线无意义（000012 反例）
-    tl_break   收盘站上趋势线（前一日在线下）；趋势线自此冻结
-    tl_retest   突破后回落，最低价回到趋势线 +RETEST_TOL% 以内、收盘未跌破
-                线 -RETEST_TOL%，且当日收盘低于突破以来最高收盘（确实在回调）
+    tl_break    收盘同时站上趋势线【和近 RANGE_N 日最高价（近期整理区间上沿）】；
+                此后参照价 = 两者取高，冻结为水平线（见 RANGE_N 注释，002745 反例）
+    tl_retest   突破后回落，最低价回到参照价 +RETEST_TOL% 以内、收盘未跌破
+                参照价 -RETEST_TOL%，且当日收盘低于突破以来最高收盘（确实在回调）
     box_break   收盘 > 平台顶 A
     box_retest  同 tl_retest 口径，参照线换成平台顶
-    failed      突破趋势线后收盘跌破线 -FAIL_PCT%，或突破平台后跌破平台顶 -FAIL_PCT%
+    failed      突破趋势线后收盘跌破参照价 -FAIL_PCT%，或突破平台后跌破平台顶 -FAIL_PCT%
     expired     突破趋势线 TL_MAX_DAYS 日未突破平台 / 突破平台 BOX_RETEST_DAYS
                 日内未回踩（后者标 done，突破成立只是没回踩）
 
@@ -70,6 +71,14 @@ TOUCH_MIN_GAP = 5       # 趋势线第二触点距平台顶至少 N 日
 # 未采用「≥3 个触点」：603986 自己的趋势线也只触碰两次（02-24、03-18）。
 TOUCH_REBOUND = 8.0     # 触点高点较（平台顶→触点之间）最低点的反弹幅度下限%
 TOUCH_POS = 0.5         # 触点在平台中的相对位置下限：(触点高-平台底)/(平台顶-平台底)
+# 破线须同时站上近 N 日最高价。下降趋势线一路下斜，价格只要在低位横盘，
+# 线迟早「插进」横盘区间，收盘随便就能在线上线下来回穿——那不是突破。
+# 用户指出 002745 木林森：08-14~08-31 在 11.0~12.0 横盘（高点 12.03/12.01/11.98），
+# 旧规则 08-27 收盘 11.96 过线即判破线，之后 09-02~09-07 又在线附近反复穿越；
+# 用户认为该区间上沿才是压力，真突破是 09-16 收 12.38。
+# 代价：603986 破线日从 04-20（收 290.54 仅压线，未过 04-17 高 295.66）推迟到
+# 04-21（收 306.27，参照价=04-20 高 295.96），04-24 回踩（低 292.81）恰落在参照价附近。
+RANGE_N = 10
 RETEST_TOL = 3.0        # 回踩容差%
 FAIL_PCT = 5.0          # 跌破参照线此比例视为失败%
 TL_MAX_DAYS = 40        # 突破趋势线后最多等多少日突破平台顶
@@ -91,6 +100,8 @@ class Pattern:
     prior_gain: float       # 平台顶较前 60 日最低 %（前段涨幅）
     tl_break: date
     tl_line: float = 0.0    # 当日趋势线价位（原始价口径）
+    range_top: float = 0.0  # 破线日前 RANGE_N 日最高价（近期整理区间上沿）
+    brk_ref: float = 0.0    # 破线后的参照价 = max(破线日趋势线, range_top)，水平冻结
     tl_retest: date | None = None
     box_break: date | None = None
     box_retest: date | None = None
@@ -121,6 +132,7 @@ def scan_series(code: str, bars: list[tuple]) -> dict:
     a = 0
     slope = 0.0
     top_adj = 0.0
+    ref_adj = 0.0
     hi_since = 0.0
     t0 = -1
 
@@ -159,9 +171,13 @@ def scan_series(code: str, bars: list[tuple]) -> dict:
             # 第二触点必须是一次真反弹的高点，否则两点连线无意义（见 TOUCH_* 注释）
             rebound = (H[tk] / min(L[a_ + 1:tk]) - 1) * 100
             touch_pos = (H[tk] - box_low) / (H[a_] - box_low)
-            if (C[i] > ln_today and C[i - 1] <= ln_prev and -depth <= BOX_MAX_DEPTH
+            rng = max(H[i - RANGE_N:i])
+            broke_today = C[i] > ln_today and C[i] > rng
+            broke_prev = C[i - 1] > ln_prev and C[i - 1] > max(H[i - 1 - RANGE_N:i - 1])
+            if (broke_today and not broke_prev and -depth <= BOX_MAX_DEPTH
                     and rebound >= TOUCH_REBOUND and touch_pos >= TOUCH_POS):
                 a, slope, top_adj, t0, hi_since = a_, sl, H[a_], i, C[i]
+                ref_adj = max(ln_today, rng)
                 p0 = max(0, a - 60)
                 cur = Pattern(
                     code=code, top_date=ds[a], top=raw_of(a, H[a]), touch_date=ds[tk],
@@ -169,6 +185,7 @@ def scan_series(code: str, bars: list[tuple]) -> dict:
                     box_depth=round(depth, 1),
                     prior_gain=round((H[a] / min(L[p0:a + 1]) - 1) * 100, 1),
                     tl_break=d, tl_line=raw_of(i, ln_today),
+                    range_top=raw_of(i, rng), brk_ref=raw_of(i, ref_adj),
                 )
                 event = "tl_break"
             out[d] = (event, replace(cur) if cur else None)
@@ -180,10 +197,10 @@ def scan_series(code: str, bars: list[tuple]) -> dict:
         if cur.box_break is None:
             if C[i] > top_adj:
                 cur.box_break, cur.state, t0, hi_since, event = d, "box_break", i, C[i], "box_break"
-            elif C[i] < line(i) * (1 - FAIL_PCT / 100):
-                cur.state, cur.end_reason, event = "failed", f"{d} 跌破趋势线 {FAIL_PCT}%", "failed"
-            elif (cur.tl_retest is None and L[i] <= line(i) * (1 + RETEST_TOL / 100)
-                  and C[i] >= line(i) * (1 - RETEST_TOL / 100) and C[i] < hi_since):
+            elif C[i] < ref_adj * (1 - FAIL_PCT / 100):
+                cur.state, cur.end_reason, event = "failed", f"{d} 跌破参照价 {FAIL_PCT}%", "failed"
+            elif (cur.tl_retest is None and L[i] <= ref_adj * (1 + RETEST_TOL / 100)
+                  and C[i] >= ref_adj * (1 - RETEST_TOL / 100) and C[i] < hi_since):
                 cur.tl_retest, cur.state, event = d, "tl_retest", "tl_retest"
             elif i - t0 > TL_MAX_DAYS:
                 cur.state, cur.end_reason, event = "expired", f"突破趋势线后 {TL_MAX_DAYS} 日未突破平台", "expired"
@@ -266,6 +283,7 @@ def snapshot(session, start: date, end: date) -> int:
                     top_date=p.top_date, top=p.top, touch_date=p.touch_date,
                     slope_pct=p.slope_pct, box_days=p.box_days, box_depth=p.box_depth,
                     prior_gain=p.prior_gain, tl_line=p.tl_line, tl_break=p.tl_break,
+                    range_top=p.range_top, brk_ref=p.brk_ref,
                     tl_retest=p.tl_retest, box_break=p.box_break, box_retest=p.box_retest,
                 ))
         total += bulk_upsert(session, StructBoxBreakout, rows)
@@ -278,7 +296,7 @@ def _fmt(p: Pattern) -> str:
     return (f"平台顶 {p.top_date} {p.top} 触点{p.touch_date} 线斜率{p.slope_pct}%/日 "
             f"平台{p.box_days}日 深{p.box_depth}% 前段+{p.prior_gain}% | "
             f"破线{p.tl_break} 回踩线{p.tl_retest or '-'} 破顶{p.box_break or '-'} "
-            f"回踩顶{p.box_retest or '-'} 今日线{p.tl_line}")
+            f"回踩顶{p.box_retest or '-'} 今日线{p.tl_line} 参照{p.brk_ref}")
 
 
 def main() -> None:

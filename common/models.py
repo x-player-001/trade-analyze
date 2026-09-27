@@ -1292,6 +1292,10 @@ class StructBoxBreakout(Base):
     box_depth: Mapped[float] = mapped_column(Float, comment="平台底较平台顶%(负)")
     prior_gain: Mapped[float] = mapped_column(Float, comment="平台顶较前60日最低%")
     tl_line: Mapped[float] = mapped_column(Price, comment="当日趋势线价位(原始价)")
+    range_top: Mapped[Optional[float]] = mapped_column(
+        Price, comment="破线日前10日最高价(近期整理区间上沿)")
+    brk_ref: Mapped[Optional[float]] = mapped_column(
+        Price, comment="破线后参照价=max(趋势线,区间上沿),回踩/失败按它判")
     tl_break: Mapped[date] = mapped_column(Date, nullable=False)
     tl_retest: Mapped[Optional[date]] = mapped_column(Date)
     box_break: Mapped[Optional[date]] = mapped_column(Date)
